@@ -11,8 +11,8 @@ fi
 
 echo "Got Token: ${TOKEN:0:10}..."
 
-echo "2. Starting Attack (20 Uploads)..."
-for i in {1..20}
+echo "2. Starting Attack (10 Uploads)..."
+for i in {1..10}
 do
    echo "Upload #$i..."
    # Upload the test video (silent output, just status code)

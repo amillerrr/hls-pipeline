@@ -11,7 +11,7 @@ resource "aws_iam_policy" "worker_policy" {
     Statement = [
       {
         Effect   = "Allow"
-        Action   = ["s3:GetObject"]
+        Action   = ["s3:GetObject", "s3:PutObject"]
         Resource = "${aws_s3_bucket.raw_ingest.arn}/*"
       },
       {
@@ -23,6 +23,7 @@ resource "aws_iam_policy" "worker_policy" {
         Effect = "Allow"
         Action = [
           "sqs:ReceiveMessage",
+          "sqs:SendMessage",
           "sqs:DeleteMessage",
           "sqs:GetQueueAttributes"
         ]
