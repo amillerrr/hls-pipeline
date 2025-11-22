@@ -1,25 +1,25 @@
-output "s3_raw_bucket" {
+output "S3_BUCKET" {
   description = "Bucket for raw video uploads"
   value       = aws_s3_bucket.raw_ingest.bucket
 }
 
-output "s3_processed_bucket" {
+output "PROCESSED_BUCKET" {
   description = "Bucket for public HLS streaming"
   value       = aws_s3_bucket.processed.bucket
 }
 
-output "sqs_queue_url" {
+output "SQS_QUEUE_URL" {
   description = "URL of the SQS queue"
   value       = aws_sqs_queue.video_queue.id
 }
 
-output "worker_access_key" {
+output "AWS_ACCESS_KEY_ID" {
   description = "AWS Access Key for the Worker App"
   value       = aws_iam_access_key.worker_key.id
   sensitive   = true
 }
 
-output "worker_secret_key" {
+output "AWS_SECRET_ACCESS_KEY" {
   description = "AWS Secret Key for the Worker App"
   value       = aws_iam_access_key.worker_key.secret
   sensitive   = true

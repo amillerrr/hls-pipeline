@@ -254,7 +254,12 @@ func processVideoABR(ctx context.Context, s3Client *s3.Client, job Job, logger *
 	// - 0/ (1080p segments + playlist)
 	// - 1/ (720p segments + playlist)
 	// - 2/ (480p segments + playlist)
-	err = uploadDirectoryToS3(procCtx, s3Client, outputDir, "processed-videos", job.FileID)
+	processedBucket := os.Getenv("PROCESSED_BUCKET")
+	if processedBucket == "" {
+		return fmt.Errorf("PROCESSED_BUCKET env var not set")
+	}
+
+	err = uploadDirectoryToS3(procCtx, s3Client, outputDir, processedBucket, job.FileID)
 	if err != nil {
 		return fmt.Errorf("failed to upload HLS: %w", err)
 	}
