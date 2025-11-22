@@ -24,3 +24,8 @@ output "AWS_SECRET_ACCESS_KEY" {
   value       = aws_iam_access_key.worker_key.secret
   sensitive   = true
 }
+
+output "CDN_DOMAIN" {
+  description = "CloudFront Domain Name"
+  value       = aws_cloudfront_distribution.s3_distribution.domain_name
+}

@@ -62,3 +62,27 @@ resource "aws_s3_bucket_cors_configuration" "processed_cors" {
     max_age_seconds = 3000
   }
 }
+
+# Allow CloudFront to read from the bucket
+data "aws_iam_policy_document" "cloudfront_oac_access" {
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.processed.arn}/*"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["cloudfront.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "AWS:SourceArn"
+      values   = [aws_cloudfront_distribution.s3_distribution.arn]
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "processed_policy" {
+  bucket = aws_s3_bucket.processed.id
+  policy = data.aws_iam_policy_document.cloudfront_oac_access.json
+}
