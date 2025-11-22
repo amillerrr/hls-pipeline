@@ -226,7 +226,7 @@ func processVideoABR(ctx context.Context, s3Client *s3.Client, job Job, logger *
 		"-map", "[v3out]", "-c:v:2", "libx264", "-b:v:2", "1000k", "-maxrate:v:2", "1100k", "-bufsize:v:2", "1500k",
 		
 		// Audio (Copied to all streams)
-		"-map", "a:0", "-c:a", "aac", "-b:a", "128k", "-ac", "2",
+		// "-map", "a:0", "-c:a", "aac", "-b:a", "128k", "-ac", "2",
 		
 		// HLS Settings
 		"-f", "hls",
