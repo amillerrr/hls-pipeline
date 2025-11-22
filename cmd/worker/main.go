@@ -230,7 +230,8 @@ func processVideoABR(ctx context.Context, s3Client *s3.Client, job Job, logger *
 		
 		// HLS Settings
 		"-f", "hls",
-		"-var_stream_map", "v:0,a:0 v:1,a:0 v:2,a:0",
+		// "-var_stream_map", "v:0,a:0 v:1,a:0 v:2,a:0",
+		"-var_stream_map", "v:0 v:1 v:2",
 		"-master_pl_name", "master.m3u8",
 		"-hls_time", "4",
 		"-hls_playlist_type", "vod",
