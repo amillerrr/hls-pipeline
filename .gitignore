@@ -5,5 +5,11 @@
 .terraform.lock.hcl
 *.tfvars
 
+# Secrets
+.env
+.env.*
+*.pem
+
+# Video Assets
 test_assets/
 tmp/
