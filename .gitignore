@@ -13,3 +13,6 @@
 # Video Assets
 test_assets/
 tmp/
+
+# OS specific
+.DS_Store
