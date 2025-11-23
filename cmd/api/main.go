@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -19,14 +18,24 @@ import (
 )
 
 func main() {
-	// 1. Load .env (Local Dev)
+	// Initialize Logger
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}))
+	
+	slog.SetDefault(logger)
+
+	// Load .env
 	if err := godotenv.Load(); err != nil {
-		log.Println("No .env file found, relying on system ENV")
+		logger.Warn("No .env file found", 
+			"details", "relying on system ENV variables",
+			"error", err.Error(),
+		)
+	} else {
+		logger.Info("Environment variables loaded from .env")
 	}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-
-	// 2. Init AWS & SQS
+	// Initialize AWS & SQS
 	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(os.Getenv("AWS_REGION")))
 	if err != nil {
 		logger.Error("Failed to load AWS config", "error", err)
@@ -40,24 +49,23 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 3. Init S3
+	// Initialize S3
 	s3Client, err := storage.NewS3Client()
 	if err != nil {
 		logger.Error("Could not connect to S3", "error", err)
 		os.Exit(1)
 	}
 
-	// 4. Dependency Injection
-	// We no longer pass Redis; we pass SQS + QueueURL
+	// Dependency Injection
 	api := handlers.New(s3Client, sqsClient, queueURL, logger)
 
-	// 5. Routing
+	// Routing
 	mux := http.NewServeMux()
 	mux.HandleFunc("/login", api.LoginHandler)
 	mux.HandleFunc("/upload", auth.AuthMiddleware(api.UploadHandler))
 	mux.Handle("/metrics", promhttp.Handler())
 
-	// 6. Server Start
+	// Start Server
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"

@@ -17,9 +17,8 @@ type Claims struct {
 	jwt.RegisteredClaims
 }
 
-// GenerateToken creates a JWT valid for 24 hours
+// Create a JWT valid for 24 hours
 func GenerateToken(username string) (string, error) {
-	// If secret is missing, safety panic!
 	if len(jwtKey) == 0 {
 		jwtKey = []byte("default_secret_do_not_use_in_prod") 
 	}
@@ -37,17 +36,17 @@ func GenerateToken(username string) (string, error) {
 	return token.SignedString(jwtKey)
 }
 
-// Middleware protects endpoints
+// Middleware for endpoints
 func AuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// 1. Get header: "Authorization: Bearer <token>"
+		// Get header: "Authorization: Bearer <token>"
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
 			http.Error(w, "Authorization header missing", http.StatusUnauthorized)
 			return
 		}
 
-		// 2. Parse parts
+		// Parse parts
 		parts := strings.Split(authHeader, " ")
 		if len(parts) != 2 || parts[0] != "Bearer" {
 			http.Error(w, "Invalid authorization format", http.StatusUnauthorized)
@@ -55,10 +54,9 @@ func AuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 		tokenString := parts[1]
 
-		// 3. Validate Token
+		// Validate Token
 		claims := &Claims{}
-		token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
-			// Validate the signing algorithm is what we expect
+		token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (any, error) {
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 				return nil, fmt.Errorf("unexpected signing method")
 			}
@@ -70,7 +68,7 @@ func AuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		// 4. Pass through to the next handler
+		// Pass through to the next handler
 		next.ServeHTTP(w, r)
 	}
 }

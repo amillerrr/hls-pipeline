@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -31,7 +30,7 @@ type Job struct {
 	FileID string `json:"file_id"`
 }
 
-// Metric: How long does transcoding take?
+// Metrics
 var (
 		transcodeDuration = promauto.NewHistogram(prometheus.HistogramOpts{
 			Name:    "transcode_duration_seconds",
@@ -48,14 +47,23 @@ var (
 type token struct{}
 
 func main() {
-	// Load .env file
-	err := godotenv.Load()
-	if err != nil {
-		log.Println("No .env file found, relying on system ENV variables")
-	}
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	// Initialize Logger
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}))
+	slog.SetDefault(logger)
 
-	// 1. AWS Config & SQS Init
+	// Load .env file
+	if err := godotenv.Load(); err != nil {
+		logger.Warn("No .env file found", 
+			"details", "relying on system ENV variables",
+			"error", err.Error(),
+		)
+	} else {
+		logger.Info("Environment variables loaded from .env")
+	}
+
+	// AWS Config and SQS Initialization
 	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(os.Getenv("AWS_REGION")))
 	if err != nil {
 		logger.Error("Failed to load AWS config", "error", err)
@@ -68,20 +76,24 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 2. Init S3 (Reusing our shared storage logic)
+	// Initialize S3
 	s3Client, err := storage.NewS3Client()
 	if err != nil {
 		logger.Error("Failed to init S3", "error", err)
 		os.Exit(1)
 	}
 
-	// 3. Metrics Server
+	// Metrics Server
 	go func() {
-        http.Handle("/metrics", promhttp.Handler())
-        http.ListenAndServe(":2112", nil) 
-  }()
+		metricsPort := ":2112"
+		logger.Info("Starting Metrics Server", "port", metricsPort)
+		http.Handle("/metrics", promhttp.Handler())
+		if err := http.ListenAndServe(metricsPort, nil); err != nil {
+			logger.Error("Metrics server failed", "error", err)
+		}
+	}()
 
-	// 4. Concurrency Limiter
+	// Concurrency Limiter
 	numCores := runtime.NumCPU()
 	maxConcurrency := numCores - 1
 	if maxConcurrency < 1 {
@@ -93,7 +105,7 @@ func main() {
 	sem := make(chan token, maxConcurrency)
 
 	for {
-		// 5. Long Polling SQS
+		// Long Polling SQS
 		msgOutput, err := sqsClient.ReceiveMessage(context.TODO(), &sqs.ReceiveMessageInput{
 			QueueUrl:            aws.String(queueURL),
 			MaxNumberOfMessages: 1,
@@ -113,7 +125,7 @@ func main() {
 
 		msg := msgOutput.Messages[0]
 
-		// 6. Acquire Semaphore
+		// Acquire Semaphore
 		sem <- token{}
 		activeJobs.Inc()
 
@@ -127,7 +139,7 @@ func main() {
 			var job Job
 			if err := json.Unmarshal([]byte(*m.Body), &job); err != nil {
 				logger.Error("Invalid job format", "body", *m.Body)
-				deleteMessage(sqsClient, queueURL, m.ReceiptHandle) 
+				deleteMessage(sqsClient, queueURL, m.ReceiptHandle, logger) 
 				return
 			}
 
@@ -138,19 +150,19 @@ func main() {
 				logger.Error("Job failed", "job_id", job.FileID, "error", err)
 			} else {
 				logger.Info("Job complete", "job_id", job.FileID)
-				deleteMessage(sqsClient, queueURL, m.ReceiptHandle)
+				deleteMessage(sqsClient, queueURL, m.ReceiptHandle, logger)
 			}
 		}(msg)
 	}
 }
 
-func deleteMessage(client *sqs.Client, queueURL string, receiptHandle *string) {
+func deleteMessage(client *sqs.Client, queueURL string, receiptHandle *string, logger *slog.Logger) {
 	_, err := client.DeleteMessage(context.TODO(), &sqs.DeleteMessageInput{
 		QueueUrl:      aws.String(queueURL),
 		ReceiptHandle: receiptHandle,
 	})
 	if err != nil {
-		fmt.Printf("Failed to delete SQS message: %v\n", err)
+		logger.Error("Failed to delete SQS message", "error", err)
 	}
 }
 
@@ -160,23 +172,22 @@ func ctxWithTimeout() context.Context {
 
 func processVideoABR(ctx context.Context, s3Client *s3.Client, job Job, logger *slog.Logger) error {
 	start := time.Now()
-	// Increase timeout for ABR transcoding (heavy CPU usage)
+	// Increase timeout for ABR transcoding
 	procCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 	defer cancel()
 
-	// 1. Prepare Paths
+	// Prepare Paths
 	tempInput := filepath.Join("/tmp/uploads", job.FileID)
-	// Base output directory. FFmpeg will create subdirs inside here.
 	outputDir := filepath.Join("/tmp/hls", job.FileID)
 	
 	os.MkdirAll("/tmp/uploads", 0755)
 	os.MkdirAll(outputDir, 0755)
 	
 	defer os.Remove(tempInput)
-	defer os.RemoveAll(outputDir) // Clean up HLS files after upload
+	defer os.RemoveAll(outputDir) 
 
-	// 2. Download from S3
-	bucket := os.Getenv("S3_BUCKET") // "raw-videos"
+	// Download from S3
+	bucket := os.Getenv("S3_BUCKET")
 	if bucket == "" {
 		return fmt.Errorf("S3_BUCKET env var not set")
 	}
@@ -186,7 +197,6 @@ func processVideoABR(ctx context.Context, s3Client *s3.Client, job Job, logger *
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
-	// We close explicitly later to be safe, but defer ensures cleanup
 	defer destFile.Close() 
 
 	resp, err := s3Client.GetObject(procCtx, &s3.GetObjectInput{
@@ -202,11 +212,8 @@ func processVideoABR(ctx context.Context, s3Client *s3.Client, job Job, logger *
 		return fmt.Errorf("failed to write temp file: %w", err)
 	}
 
-	// 3. ABR Transcode (The "Complex" part)
-	// We generate 3 variants: 1080p, 720p, 480p
-	// Note: %v in segment filename matches the variant stream index (0, 1, 2)
-	
-	// Complex Filter: Splits input into 3 streams, scales them
+	// ABR Transcode
+	// Variants: 1080p, 720p, 480p
 	filterComplex := "[0:v]split=3[v1][v2][v3];" +
 		"[v1]scale=w=1920:h=1080[v1out];" +
 		"[v2]scale=w=1280:h=720[v2out];" +
@@ -249,12 +256,7 @@ func processVideoABR(ctx context.Context, s3Client *s3.Client, job Job, logger *
 
 	logger.Info("Transcoding complete. Uploading to S3...")
 
-	// 4. Upload Recursive Directory
-	// The outputDir now contains:
-	// - master.m3u8
-	// - 0/ (1080p segments + playlist)
-	// - 1/ (720p segments + playlist)
-	// - 2/ (480p segments + playlist)
+	// Upload Recursive Directory
 	processedBucket := os.Getenv("PROCESSED_BUCKET")
 	if processedBucket == "" {
 		return fmt.Errorf("PROCESSED_BUCKET env var not set")
@@ -280,13 +282,13 @@ func uploadDirectoryToS3(ctx context.Context, s3Client *s3.Client, localDir, buc
 			return nil
 		}
 
-		// 1. Get relative path (e.g., "0/segment_001.ts")
+		// Get relative path
 		relPath, err := filepath.Rel(localDir, path)
 		if err != nil {
 			return err
 		}
 
-		// 2. Create S3 Key (e.g., "uuid-123/0/segment_001.ts")
+		// Create S3 Key
 		key := filepath.ToSlash(filepath.Join(s3Prefix, relPath))
 
 		// Open file

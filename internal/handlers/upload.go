@@ -30,7 +30,7 @@ var (
 	)
 )
 
-// APIHandler now uses SQS instead of Redis
+// APIHandler
 type APIHandler struct {
 	S3Client  *s3.Client
 	SQSClient *sqs.Client
@@ -50,7 +50,6 @@ func New(s3 *s3.Client, sqs *sqs.Client, queueURL string, logger *slog.Logger) *
 const MaxUploadSize = 500 << 20 // 500 MB
 
 func (h *APIHandler) LoginHandler(w http.ResponseWriter, r *http.Request) {
-	// (Keep existing Login Logic - unchanged)
 	user := r.FormValue("username")
 	pass := r.FormValue("password")
 
@@ -78,7 +77,7 @@ func (h *APIHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 		slog.String("method", r.Method),
 	)
 
-	// 1. Validation Checks
+	// Validation Checks
 	if r.Method != http.MethodPost {
 		uploadOps.WithLabelValues("error_method").Inc()
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -100,7 +99,7 @@ func (h *APIHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// 2. Upload to S3 (Raw Ingest)
+	// Upload to S3
 	fileUUID := uuid.New().String()
 	safeFilename := fmt.Sprintf("%s%s", fileUUID, filepath.Ext(header.Filename))
 	
@@ -120,7 +119,7 @@ func (h *APIHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. Dispatch to SQS (The Fix)
+	// Dispatch to SQS 
 	job := map[string]string{"file_id": safeFilename}
 	payload, _ := json.Marshal(job)
 
@@ -131,13 +130,11 @@ func (h *APIHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		logger.Error("SQS Dispatch Failed", "error", err)
-		// Note: In a real system, we should probably delete the S3 object here 
-		// or have a cleanup process, to avoid orphaned files.
 		http.Error(w, "Queue Error", http.StatusInternalServerError)
 		return
 	}
 
-	// 4. Success
+	// Log success
 	duration := time.Since(start)
 	logger.Info("Ingest Complete", "filename", safeFilename, "duration", duration)
 	uploadOps.WithLabelValues("success").Inc()
