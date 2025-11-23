@@ -19,7 +19,6 @@ func NewS3Client() (*s3.Client, error) {
 		return nil, fmt.Errorf("unable to load SDK config: %w", err)
 	}
 
-	// Override endpoint for MinIO if S3_ENDPOINT is set
 	endpoint := os.Getenv("S3_ENDPOINT")
 	if endpoint != "" {
 		return s3.NewFromConfig(cfg, func(o *s3.Options) {

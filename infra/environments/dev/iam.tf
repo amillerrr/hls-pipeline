@@ -28,6 +28,18 @@ resource "aws_iam_policy" "worker_policy" {
           "sqs:GetQueueAttributes"
         ]
         Resource = aws_sqs_queue.video_queue.arn
+      },
+      {
+        Sid    = "AllowXRayWrites"
+        Effect = "Allow"
+        Action = [
+          "xray:PutTraceSegments",
+          "xray:PutTelemetryRecords",
+          "xray:GetSamplingRules",
+          "xray:GetSamplingTargets",
+          "xray:GetSamplingStatisticSummaries"
+        ]
+        Resource = "*"
       }
     ]
   })

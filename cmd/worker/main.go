@@ -22,7 +22,13 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 
+	"github.com/amillerrr/hls-pipeline/internal/observability"
 	"github.com/amillerrr/hls-pipeline/internal/storage"
 )
 
@@ -63,12 +69,21 @@ func main() {
 		logger.Info("Environment variables loaded from .env")
 	}
 
+	// Inititialize Distributed Tracing
+	shutdown := observability.InitTracer(context.Background(), "eye-worker")
+	defer func() {
+		if err := shutdown(context.Background()); err != nil {
+			logger.Error("Failed to shutdown tracer", "error", err)
+		}
+	}()
+
 	// AWS Config and SQS Initialization
 	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(os.Getenv("AWS_REGION")))
 	if err != nil {
 		logger.Error("Failed to load AWS config", "error", err)
 		os.Exit(1)
 	}
+	otelaws.AppendMiddlewares(&cfg.APIOptions)
 	sqsClient := sqs.NewFromConfig(cfg)
 	queueURL := os.Getenv("SQS_QUEUE_URL")
 	if queueURL == "" {
@@ -100,7 +115,7 @@ func main() {
 		maxConcurrency = 1
 	}
 	
-	logger.Info("Worker started", "cores", numCores, "max_jobs", maxConcurrency, "mode", "ABR_SQS")
+	logger.Info("Worker started", "cores", numCores, "max_jobs", maxConcurrency, "mode", "ABR_SQS_OTel")
 
 	sem := make(chan token, maxConcurrency)
 
@@ -111,6 +126,7 @@ func main() {
 			MaxNumberOfMessages: 1,
 			WaitTimeSeconds:     20,
 			VisibilityTimeout:   600,
+			MessageAttributeNames: []string{"All"},
 		})
 		
 		if err != nil {
@@ -135,6 +151,21 @@ func main() {
 				activeJobs.Dec()
 			}()
 
+			carrier := propagation.MapCarrier{}
+			for k, v := range m.MessageAttributes {
+				if v.StringValue != nil {
+					carrier[k] = *v.StringValue
+				}
+			}
+
+			parentCtx := otel.GetTextMapPropagator().Extract(context.Background(), carrier)
+
+			// Start new Worker Span
+			tracer := otel.Tracer("worker")
+			ctx, span := tracer.Start(parentCtx, "process_job",
+				trace.WithAttributes(attribute.String("sqs.message_id", *m.MessageId)))
+			defer span.End()
+
 			// Parse Job
 			var job Job
 			if err := json.Unmarshal([]byte(*m.Body), &job); err != nil {
@@ -143,10 +174,11 @@ func main() {
 				return
 			}
 
-			logger.Info("Processing job", "job_id", job.FileID)
+			span.SetAttributes(attribute.String("job.file_id", job.FileID))
+			logger.Info("Processing job", "job_id", job.FileID, "trace_id", span.SpanContext().TraceID())
 
-			// Transcode
-			if err := processVideoABR(ctxWithTimeout(), s3Client, job, logger); err != nil {
+			// Transcode 
+			if err := processVideoABR(ctx, s3Client, job, logger); err != nil {
 				logger.Error("Job failed", "job_id", job.FileID, "error", err)
 			} else {
 				logger.Info("Job complete", "job_id", job.FileID)
@@ -166,12 +198,13 @@ func deleteMessage(client *sqs.Client, queueURL string, receiptHandle *string, l
 	}
 }
 
-func ctxWithTimeout() context.Context {
-    return context.Background()
-}
-
 func processVideoABR(ctx context.Context, s3Client *s3.Client, job Job, logger *slog.Logger) error {
 	start := time.Now()
+
+	tracer := otel.Tracer("worker")
+	ctx, span := tracer.Start(ctx, "transcode_abr")
+	defer span.End()
+
 	// Increase timeout for ABR transcoding
 	procCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 	defer cancel()

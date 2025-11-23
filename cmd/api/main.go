@@ -11,7 +11,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/joho/godotenv"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
 	
+	"github.com/amillerrr/hls-pipeline/internal/observability"
 	"github.com/amillerrr/hls-pipeline/internal/handlers"
 	"github.com/amillerrr/hls-pipeline/internal/storage" 
 	"github.com/amillerrr/hls-pipeline/internal/auth" 
@@ -22,7 +24,6 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))
-	
 	slog.SetDefault(logger)
 
 	// Load .env
@@ -35,12 +36,21 @@ func main() {
 		logger.Info("Environment variables loaded from .env")
 	}
 
+	// Initialize Distributed Tracing
+	shutdown := observability.InitTracer(context.Background(), "eye-api")
+	defer func() {
+		if err := shutdown(context.Background()); err != nil {
+			logger.Error("Failed to shutdown tracer", "error", err)
+		}
+	}()
+
 	// Initialize AWS & SQS
 	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(os.Getenv("AWS_REGION")))
 	if err != nil {
 		logger.Error("Failed to load AWS config", "error", err)
 		os.Exit(1)
 	}
+	otelaws.AppendMiddlewares(&cfg.APIOptions)
 	sqsClient := sqs.NewFromConfig(cfg)
 	
 	queueURL := os.Getenv("SQS_QUEUE_URL")

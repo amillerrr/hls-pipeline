@@ -13,9 +13,12 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 
 	"github.com/amillerrr/hls-pipeline/internal/auth"
 )
@@ -69,6 +72,12 @@ func (h *APIHandler) LoginHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *APIHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
+	// Start Tracing Span
+	ctx := r.Context()
+	tracer := otel.Tracer("api-handler")
+	ctx, span := tracer.Start(ctx, "process_upload_request")
+	defer span.End()
+
 	start := time.Now()
 	requestID := uuid.New().String()
 
@@ -106,7 +115,7 @@ func (h *APIHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 	bucket := os.Getenv("S3_BUCKET")
 	key := fmt.Sprintf("uploads/%s", safeFilename)
 
-	_, err = h.S3Client.PutObject(context.TODO(), &s3.PutObjectInput{
+	_, err = h.S3Client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:      aws.String(bucket),
 		Key:         aws.String(key),
 		Body:        file,
@@ -123,9 +132,22 @@ func (h *APIHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 	job := map[string]string{"file_id": safeFilename}
 	payload, _ := json.Marshal(job)
 
+	msgAttrs := make(map[string]types.MessageAttributeValue)
+	carrier := propagation.MapCarrier{}
+	
+	otel.GetTextMapPropagator().Inject(ctx, carrier)
+
+	for k, v := range carrier {
+		msgAttrs[k] = types.MessageAttributeValue{
+			DataType:    aws.String("String"),
+			StringValue: aws.String(v),
+		}
+	}
+
 	_, err = h.SQSClient.SendMessage(context.TODO(), &sqs.SendMessageInput{
 		QueueUrl:    aws.String(h.QueueURL),
 		MessageBody: aws.String(string(payload)),
+		MessageAttributes: msgAttrs,
 	})
 
 	if err != nil {
