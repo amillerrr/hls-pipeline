@@ -60,6 +60,25 @@ resource "aws_ecs_task_definition" "api" {
           "awslogs-stream-prefix" = "api"
         }
       }
+    },
+    {
+      name      = "aws-otel-collector"
+      image     = "public.ecr.aws/aws-observability/aws-otel-collector:latest"
+      cpu       = 0
+      essential = true
+      command   = ["--config=/etc/ecs/ecs-default-config.yaml"] 
+      portMappings = [
+        { containerPort = 4317, hostPort = 4317 }, # gRPC
+        { containerPort = 4318, hostPort = 4318 }  # HTTP
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.logs.name
+          "awslogs-region"        = var.aws_region
+          "awslogs-stream-prefix" = "otel-sidecar-api"
+        }
+      }
     }
   ])
 }
@@ -90,6 +109,25 @@ resource "aws_ecs_task_definition" "worker" {
           "awslogs-group"         = aws_cloudwatch_log_group.logs.name
           "awslogs-region"        = var.aws_region
           "awslogs-stream-prefix" = "worker"
+        }
+      }
+    },
+    {
+      name      = "aws-otel-collector"
+      image     = "public.ecr.aws/aws-observability/aws-otel-collector:latest"
+      cpu       = 0
+      essential = true
+      command   = ["--config=/etc/ecs/ecs-default-config.yaml"]
+      portMappings = [
+        { containerPort = 4317, hostPort = 4317 },
+        { containerPort = 4318, hostPort = 4318 }
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.logs.name
+          "awslogs-region"        = var.aws_region
+          "awslogs-stream-prefix" = "otel-sidecar-worker"
         }
       }
     }

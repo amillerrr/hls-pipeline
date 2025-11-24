@@ -4,9 +4,10 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"time"
 
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -16,7 +17,10 @@ import (
 // Create a new trace provider instance
 func InitTracer(ctx context.Context, serviceName string) func(context.Context) error {
 	// Create the Exporter
-	exporter, err := stdouttrace.New(stdouttrace.WithPrettyPrint())
+	exporter, err := otlptracegrpc.New(ctx,
+		otlptracegrpc.WithInsecure(),
+		otlptracegrpc.WithEndpoint("0.0.0.0:4317"),
+	)
 	if err != nil {
 		slog.Error("Failed to create trace exporter", "error", err)
 		os.Exit(1)
@@ -36,8 +40,9 @@ func InitTracer(ctx context.Context, serviceName string) func(context.Context) e
 
 	// Register the Trace Provider
 	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exporter),
+		sdktrace.WithBatcher(exporter, sdktrace.WithBatchTimeout(time.Second)),
 		sdktrace.WithResource(res),
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
 	)
 
 	otel.SetTracerProvider(tp)
