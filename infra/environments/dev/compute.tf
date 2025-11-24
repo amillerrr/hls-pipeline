@@ -152,6 +152,9 @@ resource "aws_ecs_task_definition" "api" {
       }
     }
   ])
+  lifecycle {
+    ignore_changes = [container_definitions]
+  }
 }
 
 # Worker Task
@@ -206,6 +209,9 @@ resource "aws_ecs_task_definition" "worker" {
       }
     }
   ])
+  lifecycle {
+    ignore_changes = [container_definitions]
+  }
 }
 
 # --- Services ---
