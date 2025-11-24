@@ -1,5 +1,5 @@
 locals {
-  base_config = {
+  base_otel = {
     receivers = {
       otlp = {
         protocols = {
