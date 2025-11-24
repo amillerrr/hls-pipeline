@@ -7,7 +7,7 @@ RUN go build -o worker ./cmd/worker
 
 # Final Stage
 FROM alpine:latest
-# INSTALL FFMPEG HERE
+# Install ffmpeg
 RUN apk add --no-cache ffmpeg
 WORKDIR /root/
 COPY --from=builder /app/worker .

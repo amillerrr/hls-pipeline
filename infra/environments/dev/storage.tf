@@ -5,7 +5,7 @@ resource "random_string" "suffix" {
   upper   = false
 }
 
-# A. Raw Ingest Bucket (Private)
+# Raw Ingest Bucket
 resource "aws_s3_bucket" "raw_ingest" {
   bucket        = "eye-raw-ingest-${random_string.suffix.result}"
   force_destroy = true
@@ -18,7 +18,7 @@ resource "aws_s3_bucket_versioning" "raw_ver" {
   }
 }
 
-# B. Processed Video Bucket (Public Read)
+# Processed Video Bucket 
 resource "aws_s3_bucket" "processed" {
   bucket        = "eye-processed-${random_string.suffix.result}"
   force_destroy = true

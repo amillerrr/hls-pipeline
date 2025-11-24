@@ -1,4 +1,4 @@
-# CloudFront Origin Access Control (OAC)
+# CloudFront Origin Access Control
 resource "aws_cloudfront_origin_access_control" "default" {
   name                              = "eye-oac-${random_string.suffix.result}"
   description                       = "Grant CloudFront access to S3"
@@ -28,7 +28,7 @@ resource "aws_cloudfront_distribution" "s3_distribution" {
 
     forwarded_values {
       query_string = false
-      headers      = ["Origin", "Access-Control-Request-Method", "Access-Control-Request-Headers"] # Forward CORS!
+      headers      = ["Origin", "Access-Control-Request-Method", "Access-Control-Request-Headers"]
 
       cookies {
         forward = "none"
@@ -41,7 +41,7 @@ resource "aws_cloudfront_distribution" "s3_distribution" {
     max_ttl                = 86400
   }
 
-  price_class = "PriceClass_100" # Use US/Europe only (Cheapest)
+  price_class = "PriceClass_100"
 
   restrictions {
     geo_restriction {

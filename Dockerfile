@@ -15,14 +15,12 @@ RUN go mod download
 COPY . .
 
 # Build the API binary
-# Notice we point to ./cmd/api specifically
 RUN CGO_ENABLED=0 GOOS=linux go build -o api-server ./cmd/api
 
 # Stage 2: Runner
-# We use a scratch (empty) or alpine image for the final container
 FROM alpine:latest
 
-# Install certificates for HTTPS requests (S3/AWS needs this)
+# Install certificates for HTTPS requests 
 RUN apk add --no-cache ca-certificates
 
 WORKDIR /root/
@@ -30,7 +28,7 @@ WORKDIR /root/
 # Copy only the binary from the builder stage
 COPY --from=builder /app/api-server .
 
-# Expose the port defined in your main.go
+# Expose the port defined in main.go
 EXPOSE 8080
 
 # Run the binary
