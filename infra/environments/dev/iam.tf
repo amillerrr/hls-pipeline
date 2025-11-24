@@ -40,6 +40,17 @@ resource "aws_iam_policy" "worker_policy" {
           "xray:GetSamplingStatisticSummaries"
         ]
         Resource = "*"
+      },
+      {
+        Sid    = "AllowEMFMetrics"
+        Effect = "Allow"
+        Action = [
+          "logs:PutLogEvents",
+          "logs:CreateLogStream",
+          "logs:CreateLogGroup",
+          "logs:DescribeLogStreams"
+        ]
+        Resource = "arn:aws:logs:*:*:log-group:/metrics/EyeOfTheStorm:*"
       }
     ]
   })
