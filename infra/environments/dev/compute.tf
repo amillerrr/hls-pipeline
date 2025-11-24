@@ -1,5 +1,5 @@
 locals {
-  otel_config = {
+  base_config = {
     receivers = {
       otlp = {
         protocols = {
@@ -38,6 +38,32 @@ locals {
       }
     }
   }
+  api_otel_config = merge(local.base_otel, {
+    receivers = merge(local.base_otel.receivers, {
+      prometheus = {
+        config = {
+          scrape_configs = [{
+            job_name        = "eye-api"
+            scrape_interval = "10s"
+            static_configs  = [{ targets = ["localhost:8080"] }]
+          }]
+        }
+      }
+    })
+  })
+  worker_otel_config = merge(local.base_otel, {
+    receivers = merge(local.base_otel.receivers, {
+      prometheus = {
+        config = {
+          scrape_configs = [{
+            job_name        = "eye-worker"
+            scrape_interval = "10s"
+            static_configs  = [{ targets = ["localhost:2112"] }]
+          }]
+        }
+      }
+    })
+  })
 }
 
 # Security Group for the api and worker
@@ -88,11 +114,13 @@ resource "aws_ecs_task_definition" "api" {
     {
       name  = "api"
       image = "${aws_ecr_repository.api.repository_url}:latest"
+      dependsOn = [{ containerName = "aws-otel-collector", condition = "START" }]
       portMappings = [{ containerPort = 8080 }]
       environment = [
         { name = "AWS_REGION", value = var.aws_region },
         { name = "S3_BUCKET", value = aws_s3_bucket.raw_ingest.bucket },
-        { name = "SQS_QUEUE_URL", value = aws_sqs_queue.video_queue.id }
+        { name = "SQS_QUEUE_URL", value = aws_sqs_queue.video_queue.id },
+        { name = "OTEL_EXPORTER_OTLP_ENDPOINT", value = "http://localhost:4317" }
       ]
       logConfiguration = {
         logDriver = "awslogs"
@@ -111,7 +139,7 @@ resource "aws_ecs_task_definition" "api" {
       environment = [
         {
           name  = "AOT_CONFIG_CONTENT"
-          value = yamlencode(local.otel_config)
+          value = yamlencode(local.api_otel_config)
         }
       ]
       logConfiguration = {
@@ -140,11 +168,13 @@ resource "aws_ecs_task_definition" "worker" {
     {
       name  = "worker"
       image = "${aws_ecr_repository.worker.repository_url}:latest"
+      dependsOn = [{ containerName = "aws-otel-collector", condition = "START" }]
       environment = [
         { name = "AWS_REGION", value = var.aws_region },
         { name = "S3_BUCKET", value = aws_s3_bucket.raw_ingest.bucket },
         { name = "PROCESSED_BUCKET", value = aws_s3_bucket.processed.bucket },
-        { name = "SQS_QUEUE_URL", value = aws_sqs_queue.video_queue.id }
+        { name = "SQS_QUEUE_URL", value = aws_sqs_queue.video_queue.id },
+        { name = "OTEL_EXPORTER_OTLP_ENDPOINT", value = "http://localhost:4317" }
       ]
       logConfiguration = {
         logDriver = "awslogs"
@@ -163,7 +193,7 @@ resource "aws_ecs_task_definition" "worker" {
       environment = [
         {
           name  = "AOT_CONFIG_CONTENT"
-          value = yamlencode(local.otel_config)
+          value = yamlencode(local.worker_otel_config)
         }
       ]
       logConfiguration = {
