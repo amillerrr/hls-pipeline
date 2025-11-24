@@ -30,6 +30,7 @@ import (
 
 	"github.com/amillerrr/hls-pipeline/internal/observability"
 	"github.com/amillerrr/hls-pipeline/internal/storage"
+	"github.com/amillerrr/hls-pipeline/internal/logger"
 )
 
 type Job struct {
@@ -54,57 +55,52 @@ type token struct{}
 
 func main() {
 	// Initialize Logger
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	}))
-	slog.SetDefault(logger)
+	log := logger.New()
+	slog.SetDefault(log)
 
 	// Load .env file
 	if err := godotenv.Load(); err != nil {
-		logger.Warn("No .env file found", 
-			"details", "relying on system ENV variables",
-			"error", err.Error(),
-		)
+		logger.Info(context.Background(), log, "No .env file found, relying on system ENV variables")
 	} else {
-		logger.Info("Environment variables loaded from .env")
+		logger.Info(context.Background(), log, "Environment variables loaded from .env")
 	}
 
 	// Inititialize Distributed Tracing
 	shutdown := observability.InitTracer(context.Background(), "eye-worker")
 	defer func() {
 		if err := shutdown(context.Background()); err != nil {
-			logger.Error("Failed to shutdown tracer", "error", err)
+			logger.Error(context.Background(), log, "Failed to shutdown tracer", "error", err)
 		}
 	}()
 
 	// AWS Config and SQS Initialization
 	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(os.Getenv("AWS_REGION")))
 	if err != nil {
-		logger.Error("Failed to load AWS config", "error", err)
+		logger.Error(context.Background(), log, "Failed to load AWS config", "error", err)
 		os.Exit(1)
 	}
 	otelaws.AppendMiddlewares(&cfg.APIOptions)
 	sqsClient := sqs.NewFromConfig(cfg)
 	queueURL := os.Getenv("SQS_QUEUE_URL")
 	if queueURL == "" {
-		logger.Error("SQS_QUEUE_URL is not set")
+		logger.Error(context.Background(), log, "SQS_QUEUE_URL is not set")
 		os.Exit(1)
 	}
 
 	// Initialize S3
 	s3Client, err := storage.NewS3Client()
 	if err != nil {
-		logger.Error("Failed to init S3", "error", err)
+		logger.Error(context.Background(), log, "Failed to init S3", "error", err)
 		os.Exit(1)
 	}
 
 	// Metrics Server
 	go func() {
 		metricsPort := ":2112"
-		logger.Info("Starting Metrics Server", "port", metricsPort)
+		logger.Info(context.Background(), log, "Starting Metrics Server", "port", metricsPort)
 		http.Handle("/metrics", promhttp.Handler())
 		if err := http.ListenAndServe(metricsPort, nil); err != nil {
-			logger.Error("Metrics server failed", "error", err)
+			logger.Error(context.Background(), log, "Metrics server failed", "error", err)
 		}
 	}()
 
@@ -115,7 +111,7 @@ func main() {
 		maxConcurrency = 1
 	}
 	
-	logger.Info("Worker started", "cores", numCores, "max_jobs", maxConcurrency, "mode", "ABR_SQS_OTel")
+	logger.Info(context.Background(), log, "Worker started", "cores", numCores, "max_jobs", maxConcurrency)
 
 	sem := make(chan token, maxConcurrency)
 
@@ -130,7 +126,7 @@ func main() {
 		})
 		
 		if err != nil {
-			logger.Error("SQS receive failed", "error", err)
+			logger.Error(context.Background(), log, "SQS receive failed", "error", err)
 			time.Sleep(5 * time.Second)
 			continue
 		}
@@ -169,36 +165,36 @@ func main() {
 			// Parse Job
 			var job Job
 			if err := json.Unmarshal([]byte(*m.Body), &job); err != nil {
-				logger.Error("Invalid job format", "body", *m.Body)
-				deleteMessage(sqsClient, queueURL, m.ReceiptHandle, logger) 
+				logger.Error(ctx, log, "Invalid job format", "body", *m.Body)
+				deleteMessage(ctx, sqsClient, queueURL, m.ReceiptHandle, log)
 				return
 			}
 
 			span.SetAttributes(attribute.String("job.file_id", job.FileID))
-			logger.Info("Processing job", "job_id", job.FileID, "trace_id", span.SpanContext().TraceID())
+			logger.Info(ctx, log, "Processing job started", "job_id", job.FileID)
 
 			// Transcode 
-			if err := processVideoABR(ctx, s3Client, job, logger); err != nil {
-				logger.Error("Job failed", "job_id", job.FileID, "error", err)
+			if err := processVideoABR(ctx, s3Client, job, log); err != nil {
+				logger.Error(ctx, log, "Job failed", "job_id", job.FileID, "error", err)
 			} else {
-				logger.Info("Job complete", "job_id", job.FileID)
-				deleteMessage(sqsClient, queueURL, m.ReceiptHandle, logger)
+				logger.Info(ctx, log, "Job complete", "job_id", job.FileID)
+				deleteMessage(ctx, sqsClient, queueURL, m.ReceiptHandle, log)
 			}
 		}(msg)
 	}
 }
 
-func deleteMessage(client *sqs.Client, queueURL string, receiptHandle *string, logger *slog.Logger) {
+func deleteMessage(ctx context.Context, client *sqs.Client, queueURL string, receiptHandle *string, log *slog.Logger) {
 	_, err := client.DeleteMessage(context.TODO(), &sqs.DeleteMessageInput{
 		QueueUrl:      aws.String(queueURL),
 		ReceiptHandle: receiptHandle,
 	})
 	if err != nil {
-		logger.Error("Failed to delete SQS message", "error", err)
+		logger.Error(ctx, log, "Failed to delete SQS message", "error", err)
 	}
 }
 
-func processVideoABR(ctx context.Context, s3Client *s3.Client, job Job, logger *slog.Logger) error {
+func processVideoABR(ctx context.Context, s3Client *s3.Client, job Job, log *slog.Logger) error {
 	start := time.Now()
 
 	tracer := otel.Tracer("worker")
@@ -225,7 +221,7 @@ func processVideoABR(ctx context.Context, s3Client *s3.Client, job Job, logger *
 		return fmt.Errorf("S3_BUCKET env var not set")
 	}
 
-	logger.Info("Downloading raw video...", "key", "uploads/"+job.FileID)
+	logger.Info(ctx, log, "Downloading raw video...", "key", "uploads/"+job.FileID)
 	destFile, err := os.Create(tempInput)
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
@@ -282,12 +278,12 @@ func processVideoABR(ctx context.Context, s3Client *s3.Client, job Job, logger *
 	// FFmpeg writes to stderr for logging
 	cmd.Stderr = os.Stderr 
 
-	logger.Info("Starting ABR transcoding...")
+	logger.Info(ctx, log, "Starting ABR transcoding...")
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("ffmpeg failed: %w", err)
 	}
 
-	logger.Info("Transcoding complete. Uploading to S3...")
+	logger.Info(ctx, log, "Transcoding complete. Uploading to S3...")
 
 	// Upload Recursive Directory
 	processedBucket := os.Getenv("PROCESSED_BUCKET")

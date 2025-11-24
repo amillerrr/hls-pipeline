@@ -19,7 +19,7 @@ func InitTracer(ctx context.Context, serviceName string) func(context.Context) e
 	// Create the Exporter
 	exporter, err := otlptracegrpc.New(ctx,
 		otlptracegrpc.WithInsecure(),
-		otlptracegrpc.WithEndpoint("0.0.0.0:4317"),
+		otlptracegrpc.WithEndpoint("localhost:4317"),
 	)
 	if err != nil {
 		slog.Error("Failed to create trace exporter", "error", err)
@@ -40,14 +40,11 @@ func InitTracer(ctx context.Context, serviceName string) func(context.Context) e
 
 	// Register the Trace Provider
 	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exporter, sdktrace.WithBatchTimeout(time.Second)),
+		sdktrace.WithBatcher(exporter, sdktrace.WithBatchTimeout(5*time.Second)),
 		sdktrace.WithResource(res),
-		sdktrace.WithSampler(sdktrace.AlwaysSample()),
 	)
 
 	otel.SetTracerProvider(tp)
-
-	// Set Global Propagator
 	otel.SetTextMapPropagator(propagation.TraceContext{})
 
 	slog.Info("OpenTelemetry Tracer initialized", "service", serviceName)

@@ -1,3 +1,45 @@
+locals {
+  otel_config = {
+    receivers = {
+      otlp = {
+        protocols = {
+          grpc = { endpoint = "0.0.0.0:4317" } 
+          http = { endpoint = "0.0.0.0:4318" }
+        }
+      }
+      prometheus = {
+        config = {
+          scrape_configs = [
+            {
+              job_name        = "eye-api"
+              scrape_interval = "10s"
+              static_configs  = [{ targets = ["localhost:8080"] }]
+            },
+            {
+              job_name        = "eye-worker"
+              scrape_interval = "10s"
+              static_configs  = [{ targets = ["localhost:2112"] }]
+            }
+          ]
+        }
+      }
+    }
+    exporters = {
+      awsxray = { region = var.aws_region }
+      awsemf  = {
+        region    = var.aws_region
+        namespace = "EyeOfTheStorm"
+      }
+    }
+    service = {
+      pipelines = {
+        traces  = { receivers = ["otlp"], exporters = ["awsxray"] }
+        metrics = { receivers = ["prometheus"], exporters = ["awsemf"] }
+      }
+    }
+  }
+}
+
 # Security Group for the api and worker
 resource "aws_security_group" "task_sg" {
   name   = "eye-task-sg"
@@ -66,10 +108,11 @@ resource "aws_ecs_task_definition" "api" {
       image     = "public.ecr.aws/aws-observability/aws-otel-collector:latest"
       cpu       = 0
       essential = true
-      command   = ["--config=/etc/ecs/ecs-default-config.yaml"] 
-      portMappings = [
-        { containerPort = 4317, hostPort = 4317 }, # gRPC
-        { containerPort = 4318, hostPort = 4318 }  # HTTP
+      environment = [
+        {
+          name  = "AOT_CONFIG_CONTENT"
+          value = yamlencode(local.otel_config)
+        }
       ]
       logConfiguration = {
         logDriver = "awslogs"
@@ -117,10 +160,11 @@ resource "aws_ecs_task_definition" "worker" {
       image     = "public.ecr.aws/aws-observability/aws-otel-collector:latest"
       cpu       = 0
       essential = true
-      command   = ["--config=/etc/ecs/ecs-default-config.yaml"]
-      portMappings = [
-        { containerPort = 4317, hostPort = 4317 },
-        { containerPort = 4318, hostPort = 4318 }
+      environment = [
+        {
+          name  = "AOT_CONFIG_CONTENT"
+          value = yamlencode(local.otel_config)
+        }
       ]
       logConfiguration = {
         logDriver = "awslogs"
