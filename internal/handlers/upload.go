@@ -21,6 +21,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 
 	"github.com/amillerrr/hls-pipeline/internal/auth"
+	"github.com/amillerrr/hls-pipeline/internal/logger"
 )
 
 var (
@@ -81,7 +82,7 @@ func (h *APIHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	requestID := uuid.New().String()
 
-	logger := h.Logger.With(
+	reqLogger := h.Logger.With(
 		slog.String("req_id", requestID),
 		slog.String("method", r.Method),
 	)
@@ -95,14 +96,14 @@ func (h *APIHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	r.Body = http.MaxBytesReader(w, r.Body, MaxUploadSize)
 	if err := r.ParseMultipartForm(MaxUploadSize); err != nil {
-		logger.Error("File too large", "error", err)
+		logger.Error(ctx, reqLogger, "File too large", "error", err)
 		http.Error(w, "File too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 
 	file, header, err := r.FormFile("video")
 	if err != nil {
-		logger.Error("Form file error", "error", err)
+		logger.Error(ctx, reqLogger, "Form file error", "error", err)
 		http.Error(w, "Invalid file", http.StatusBadRequest)
 		return
 	}
@@ -123,7 +124,7 @@ func (h *APIHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 	})
 
 	if err != nil {
-		logger.Error("S3 Upload Failed", "error", err)
+		logger.Error(ctx, reqLogger, "S3 Upload Failed", "error", err)
 		http.Error(w, "Storage Error", http.StatusInternalServerError)
 		return
 	}
@@ -151,14 +152,14 @@ func (h *APIHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 	})
 
 	if err != nil {
-		logger.Error("SQS Dispatch Failed", "error", err)
+		logger.Error(ctx, reqLogger, "SQS Dispatch Failed", "error", err)
 		http.Error(w, "Queue Error", http.StatusInternalServerError)
 		return
 	}
 
 	// Log success
 	duration := time.Since(start)
-	logger.Info("Ingest Complete", "filename", safeFilename, "duration", duration)
+	logger.Info(ctx, reqLogger, "Ingest Complete", "filename", safeFilename, "duration", duration)
 	uploadOps.WithLabelValues("success").Inc()
 
 	w.WriteHeader(http.StatusAccepted)
