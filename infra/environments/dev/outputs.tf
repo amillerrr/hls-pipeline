@@ -22,3 +22,13 @@ output "API_ENDPOINT" {
   description = "Public Load Balancer DNS"
   value       = "http://${aws_lb.main.dns_name}"
 }
+
+output "ECR_API_URL" {
+  description = "URL for API Docker Image"
+  value       = aws_ecr_repository.api.repository_url
+}
+
+output "ECR_WORKER_URL" {
+  description = "URL for Worker Docker Image"
+  value       = aws_ecr_repository.worker.repository_url
+}

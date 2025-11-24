@@ -103,6 +103,7 @@ resource "aws_ecs_service" "api" {
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.api.arn
   desired_count   = 1
+  wait_for_steady_state = false
 
   capacity_provider_strategy {
     capacity_provider = "FARGATE"
@@ -133,6 +134,7 @@ resource "aws_ecs_service" "worker" {
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.worker.arn
   desired_count   = 1
+  wait_for_steady_state = false
 
   capacity_provider_strategy {
     capacity_provider = "FARGATE_SPOT"
