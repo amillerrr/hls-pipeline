@@ -288,10 +288,11 @@ func processVideoABR(ctx context.Context, s3Client *s3.Client, job Job, log *slo
 	// ABR Transcode
 	// Variants: 1080p, 720p, 480p
 	filterComplex := "[0:v]split=3[v1][v2][v3];" +
-		"[v1]scale=w=1920:h=1080, split[v1out][v1metric];" +
-		"[v2]scale=w=1280:h=720[v2out];" +
+		"[v1]scale=w=1920:h=1080[v1out];" +
+		"[v2]scale=w=1280:h=720,split[v2out][v2metric];" +
 		"[v3]scale=w=854:h=480[v3out];" +
-		"[v1metric][0:v]ssim=stats_file=-[ssimstats]"
+		"[v2metric]scale=w=1920:h=1080[v2upscaled];" +
+		"[v2upscaled][0:v]ssim=stats_file=-[ssimstats]"
 
 	cmd := exec.CommandContext(procCtx, "ffmpeg",
 		"-y",
