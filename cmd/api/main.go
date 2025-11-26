@@ -69,6 +69,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/login", api.LoginHandler)
 	mux.HandleFunc("/upload", auth.AuthMiddleware(api.UploadHandler))
+	mux.HandleFunc("/latest", api.GetLatestVideoHandler)
 	mux.Handle("/metrics", promhttp.Handler())
 
 	// Start Server

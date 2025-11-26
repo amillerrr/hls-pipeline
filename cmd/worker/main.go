@@ -10,7 +10,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -33,22 +36,30 @@ import (
 	"github.com/amillerrr/hls-pipeline/internal/logger"
 )
 
+// Metrics
+var (
+	transcodeDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name:    "transcode_duration_seconds",
+		Help:    "Time taken to transcode video",
+		Buckets: prometheus.LinearBuckets(10, 10, 10),
+	})
+	activeJobs = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "worker_active_jobs",
+		Help: "Number of jobs currently processing on this node",
+	})
+	videoQuality = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "transcode_quality_ssim",
+		Help: "Structural Similarity Index",
+	}, []string{"file_id", "resolution"})
+	currentBitrate = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "transcode_bitrate_kbps",
+		Help: "Current bitrate of the transcoding process",
+	}, []string{"file_id"})
+)
+
 type Job struct {
 	FileID string `json:"file_id"`
 }
-
-// Metrics
-var (
-		transcodeDuration = promauto.NewHistogram(prometheus.HistogramOpts{
-			Name:    "transcode_duration_seconds",
-			Help:    "Time taken to transcode video",
-			Buckets: prometheus.LinearBuckets(10, 10, 10),
-		})
-		activeJobs = promauto.NewGauge(prometheus.GaugeOpts{
-			Name: "worker_active_jobs",
-			Help: "Number of jobs currently processing on this node",
-		})
-)
 
 // Semaphore token
 type token struct{}
@@ -194,6 +205,24 @@ func deleteMessage(ctx context.Context, client *sqs.Client, queueURL string, rec
 	}
 }
 
+// Intercept the stderr stream
+type FFmpegLogParser struct {
+	FileID string
+}
+
+func (p *FFmpegLogParser) Write(b []byte) (int, error) {
+	line := string(b)
+	if strings.Contains(line, "bitrate=") {
+		re := regexp.MustCompile(`bitrate=\s*([\d\.]+)kbits/s`)
+		matches := re.FindStringSubmatch(line)
+		if len(matches) > 1 {
+			val, _ := strconv.ParseFloat(matches[1], 64)
+			currentBitrate.WithLabelValues(p.FileID).Set(val)
+		}
+	}
+	return os.Stderr.Write(b)
+}
+
 func processVideoABR(ctx context.Context, s3Client *s3.Client, job Job, log *slog.Logger) error {
 	start := time.Now()
 
@@ -244,13 +273,15 @@ func processVideoABR(ctx context.Context, s3Client *s3.Client, job Job, log *slo
 	// ABR Transcode
 	// Variants: 1080p, 720p, 480p
 	filterComplex := "[0:v]split=3[v1][v2][v3];" +
-		"[v1]scale=w=1920:h=1080[v1out];" +
+		"[v1]scale=w=1920:h=1080, split[v1out][v1metric];" +
 		"[v2]scale=w=1280:h=720[v2out];" +
-		"[v3]scale=w=854:h=480[v3out]"
+		"[v3]scale=w=854:h=480[v3out]" +
+		"[v1metric][0:v]ssim=stats_file=-[ssimstats]"
 
 	cmd := exec.CommandContext(procCtx, "ffmpeg",
 		"-i", tempInput,
 		"-filter_complex", filterComplex,
+		"-map", "[ssimstats]", "-f", "null", "-",
 		
 		// Stream 1: 1080p (High)
 		"-map", "[v1out]", "-c:v:0", "libx264", "-b:v:0", "4500k", "-maxrate:v:0", "5000k", "-bufsize:v:0", "7500k",
@@ -275,8 +306,8 @@ func processVideoABR(ctx context.Context, s3Client *s3.Client, job Job, log *slo
 		filepath.Join(outputDir, "%v", "playlist.m3u8"),
 	)
 
-	// FFmpeg writes to stderr for logging
-	cmd.Stderr = os.Stderr 
+	// Wire up the parser
+	cmd.Stderr = &FFmpegLogParser{FileID: job.FileID}
 
 	logger.Info(ctx, log, "Starting ABR transcoding...")
 	if err := cmd.Run(); err != nil {

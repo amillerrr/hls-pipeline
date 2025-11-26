@@ -5,10 +5,14 @@ RUN go mod download
 COPY . .
 RUN go build -o worker ./cmd/worker
 
+FROM linuxserver/ffmpeg:version-8.0-cli AS ffmpeg
+
 # Final Stage
 FROM alpine:latest
 # Install ffmpeg
 RUN apk add --no-cache ffmpeg
 WORKDIR /root/
 COPY --from=builder /app/worker .
+COPY --from=ffmpeg /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
+RUN apk add --no-cache libstdc++ libgomp expat
 CMD ["./worker"]

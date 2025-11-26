@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Eye of the Storm - Debug Player</title>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <style>
+    body { background: #1a1a1a; color: #fff; font-family: monospace; }
+    #video-container { width: 80%; margin: 20px auto; border: 1px solid #444; }
+    video { width: 100%; }
+    #metrics { padding: 20px; font-size: 12px; color: #0f0; }
+  </style>
+</head>
+<body>
+  <div id="video-container">
+    <video id="video" controls></video>
+  </div>
+  <div id="metrics">
+    <h3>Real-time Metrics</h3>
+    <div id="stat_level">Current Level: Loading...</div>
+    <div id="stat_bitrate">Bitrate: Loading...</div>
+    <div id="stat_res">Resolution: Loading...</div>
+  </div>
+
+  <script>
+    var video = document.getElementById('video');
+    // Replace this with the Load Balancer DNS from Terraform Output
+    var apiEndpoint = 'http://ALB_DNS_NAME/latest'
+
+    fetch(apiEndpoint) 
+      .then(response => response.json())
+      .then(data => {
+        if (data.stream_url) {
+          console.log("Loading latest video:", data.file_id);
+          var videoSrc = data.stream_url;
+          
+          if (Hls.isSupported()) {
+            var hls = new Hls({
+              debug: false,
+              capLevelToPlayerSize: true 
+            });
+
+            hls.loadSource(videoSrc);
+            hls.attachMedia(video);
+
+            hls.on(Hls.Events.MANIFEST_PARSED, function() {
+              video.play();
+            });
+            hls.on(Hls.Events.LEVEL_SWITCHED, function(event, data) {
+              var level = hls.levels[data.level];
+              document.getElementById('stat_level').innerText = "Current Level Index: " + data.level;
+              document.getElementById('stat_bitrate').innerText = "Bitrate: " + (level.bitrate / 1000).toFixed(0) + " kbps";
+              document.getElementById('stat_res').innerText = "Resolution: " + level.width + "x" + level.height;
+            });
+          }
+        } else {
+          console.error("No processed videos found.");
+          document.body.innerHTML += "<h1>No videos found. Upload one first!</h1>";
+        }
+      })
+      .catch(err => {
+        console.error("API Error:", err);
+        document.body.innerHTML += "<h3>Error connecting to API. Check console output.</h3>";
+      });
+    }
+  </script>
+</body>
+</html>

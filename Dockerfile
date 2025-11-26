@@ -1,13 +1,12 @@
 # Stage 1: Builder
-# We use a larger image to compile the code
 FROM golang:1.25.4-alpine AS builder
 
-# Install git (sometimes needed for dependencies)
+# Install git 
 RUN apk add --no-cache git
 
 WORKDIR /app
 
-# Download dependencies first (Caching layer)
+# Download dependencies 
 COPY go.mod go.sum ./
 RUN go mod download
 
@@ -25,7 +24,7 @@ RUN apk add --no-cache ca-certificates
 
 WORKDIR /root/
 
-# Copy only the binary from the builder stage
+# Copy the binary from the builder stage
 COPY --from=builder /app/api-server .
 
 # Expose the port defined in main.go

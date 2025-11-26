@@ -120,7 +120,9 @@ resource "aws_ecs_task_definition" "api" {
         { name = "AWS_REGION", value = var.aws_region },
         { name = "S3_BUCKET", value = aws_s3_bucket.raw_ingest.bucket },
         { name = "SQS_QUEUE_URL", value = aws_sqs_queue.video_queue.id },
-        { name = "OTEL_EXPORTER_OTLP_ENDPOINT", value = "http://localhost:4317" }
+        { name = "OTEL_EXPORTER_OTLP_ENDPOINT", value = "http://localhost:4317" },
+        { name = "PROCESSED_BUCKET", value = aws_s3_bucket.processed.bucket },
+        { name = "CDN_DOMAIN", value = aws_cloudfront_distribution.s3_distribution.domain_name }
       ]
       logConfiguration = {
         logDriver = "awslogs"
