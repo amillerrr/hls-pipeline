@@ -180,7 +180,9 @@ resource "aws_ecs_task_definition" "worker" {
         { name = "S3_BUCKET", value = aws_s3_bucket.raw_ingest.bucket },
         { name = "PROCESSED_BUCKET", value = aws_s3_bucket.processed.bucket },
         { name = "SQS_QUEUE_URL", value = aws_sqs_queue.video_queue.id },
-        { name = "OTEL_EXPORTER_OTLP_ENDPOINT", value = "http://localhost:4317" }
+        { name = "OTEL_EXPORTER_OTLP_ENDPOINT", value = "http://localhost:4317" },
+        { name = "MAX_CONCURRENT_JOBS", value = "1" }
+
       ]
       logConfiguration = {
         logDriver = "awslogs"

@@ -117,14 +117,23 @@ func main() {
 	}()
 
 	// Concurrency Limiter
-	numCores := runtime.NumCPU()
-	maxConcurrency := numCores - 1
-	if maxConcurrency < 1 {
-		maxConcurrency = 1
-	}
+	maxConcurrency := 1
 	
-	logger.Info(context.Background(), log, "Worker started", "cores", numCores, "max_jobs", maxConcurrency)
+	// Allow override via env variable
+	if val := os.Getenv("MAX_CONCURRENT_JOBS"); val != "" {
+			if n, err := strconv.Atoi(val); err == nil && n > 0 {
+					maxConcurrency = n
+			} else {
+					logger.Info(context.Background(), log, "Invalid MAX_CONCURRENT_JOBS, defaulting to 1", "value", val)
+			}
+	}
 
+	// Log the decision
+	logger.Info(context.Background(), log, "Worker started", 
+			"physical_cores", runtime.NumCPU(), 
+			"configured_concurrency", maxConcurrency,
+	)
+	
 	sem := make(chan token, maxConcurrency)
 
 	for {
@@ -234,7 +243,9 @@ func monitorFFmpegOutput(stream io.ReadCloser, fileID string) {
 			}
 		}
 
-		fmt.Fprintln(os.Stderr, line)
+		if !strings.Contains(line, "Y:") {
+			fmt.Fprintln(os.Stderr, line)
+		}
 	}
 }
 
