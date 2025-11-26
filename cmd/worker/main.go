@@ -206,10 +206,10 @@ func deleteMessage(ctx context.Context, client *sqs.Client, queueURL string, rec
 	}
 }
 
-func monitorFFmpegOutput(stderr io.ReadCloser, fileID string) {
-	scanner := bufio.NewScanner(stderr)
+func monitorFFmpegOutput(stream io.ReadCloser, fileID string) {
+	scanner := bufio.NewScanner(stream)
 	reBitrate := regexp.MustCompile(`bitrate=\s*([\d\.]+)kbits/s`)
-	reSSIM := regexp.MustCompile(`SSIM Y:([\d\.]+)`)
+	reSSIM := regexp.MustCompile(`Y:([\d\.]+)`)
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -225,7 +225,7 @@ func monitorFFmpegOutput(stderr io.ReadCloser, fileID string) {
 		}
 
 		// Parse SSIM
-		if strings.Contains(line, "SSIM Y:") {
+		if strings.Contains(line, "Y:") {
 			matches := reSSIM.FindStringSubmatch(line)
 			if len(matches) > 1 {
 				if val, err := strconv.ParseFloat(matches[1], 64); err == nil {
@@ -326,12 +326,17 @@ func processVideoABR(ctx context.Context, s3Client *s3.Client, job Job, log *slo
 	if err != nil {
 		return fmt.Errorf("failed to get stderr pipe: %w", err)
 	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("failed to get stdout pipe: %w", err)
+	}
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("ffmpeg failed to start: %w", err)
 	}
 
 	go monitorFFmpegOutput(stderr, job.FileID)
+	go monitorFFmpegOutput(stdout, job.FileID)
 
 	logger.Info(ctx, log, "Starting ABR transcoding...")
 	if err := cmd.Wait(); err != nil {
