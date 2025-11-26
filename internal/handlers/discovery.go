@@ -19,6 +19,9 @@ type VideoMetadata struct {
 }
 
 func (h *APIHandler) GetLatestVideoHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Content-Type", "application/json")
+
 	bucket := os.Getenv("PROCESSED_BUCKET")
 	cdnDomain := os.Getenv("CDN_DOMAIN")
     

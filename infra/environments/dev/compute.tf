@@ -29,6 +29,7 @@ locals {
       awsemf  = {
         region    = var.aws_region
         namespace = "EyeOfTheStorm"
+        dimension_rollup_option = "NoDimensionRollup"
       }
     }
     service = {

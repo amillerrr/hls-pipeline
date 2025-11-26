@@ -11,6 +11,14 @@ resource "aws_security_group" "lb_sg" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  # Allow public HTTPS traffic 
+  ingress {
+    protocol    = "tcp"
+    from_port   = 443
+    to_port     = 443
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
   # Allow outbound to anywhere
   egress {
     protocol    = "-1"

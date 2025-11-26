@@ -15,8 +15,11 @@ resource "aws_iam_policy" "worker_policy" {
       {
         Sid      = "S3ProcessedAccess"
         Effect   = "Allow"
-        Action   = ["s3:PutObject", "s3:PutObjectAcl"]
-        Resource = "${aws_s3_bucket.processed.arn}/*"
+        Action   = ["s3:PutObject", "s3:PutObjectAcl", "s3:ListBucket", "s3:GetObject"]
+        Resource = [
+          "${aws_s3_bucket.processed.arn}",
+          "${aws_s3_bucket.processed.arn}/*"
+        ]
       },
       {
         Sid    = "SQSAccess"

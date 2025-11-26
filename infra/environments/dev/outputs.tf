@@ -20,7 +20,7 @@ output "CDN_DOMAIN" {
 
 output "API_ENDPOINT" {
   description = "Public Load Balancer DNS"
-  value       = "http://${aws_lb.main.dns_name}"
+  value       = "https://${aws_route53_record.api.name}" 
 }
 
 output "ECR_API_URL" {
