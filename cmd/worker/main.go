@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -205,22 +206,36 @@ func deleteMessage(ctx context.Context, client *sqs.Client, queueURL string, rec
 	}
 }
 
-// Intercept the stderr stream
-type FFmpegLogParser struct {
-	FileID string
-}
+func monitorFFmpegOutput(stderr io.ReadCloser, fileID string) {
+	scanner := bufio.NewScanner(stderr)
+	reBitrate := regexp.MustCompile(`bitrate=\s*([\d\.]+)kbits/s`)
+	reSSIM := regexp.MustCompile(`SSIM Y:([\d\.]+)`)
 
-func (p *FFmpegLogParser) Write(b []byte) (int, error) {
-	line := string(b)
-	if strings.Contains(line, "bitrate=") {
-		re := regexp.MustCompile(`bitrate=\s*([\d\.]+)kbits/s`)
-		matches := re.FindStringSubmatch(line)
-		if len(matches) > 1 {
-			val, _ := strconv.ParseFloat(matches[1], 64)
-			currentBitrate.WithLabelValues(p.FileID).Set(val)
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		// Parse Bitrate
+		if strings.Contains(line, "bitrate=") {
+			matches := reBitrate.FindStringSubmatch(line)
+			if len(matches) > 1 {
+				if val, err := strconv.ParseFloat(matches[1], 64); err == nil {
+					currentBitrate.WithLabelValues(fileID).Set(val)
+				}
+			}
 		}
+
+		// Parse SSIM
+		if strings.Contains(line, "SSIM Y:") {
+			matches := reSSIM.FindStringSubmatch(line)
+			if len(matches) > 1 {
+				if val, err := strconv.ParseFloat(matches[1], 64); err == nil {
+					videoQuality.WithLabelValues(fileID, "1080p").Set(val)
+				}
+			}
+		}
+
+		fmt.Fprintln(os.Stderr, line)
 	}
-	return os.Stderr.Write(b)
 }
 
 func processVideoABR(ctx context.Context, s3Client *s3.Client, job Job, log *slog.Logger) error {
@@ -279,6 +294,7 @@ func processVideoABR(ctx context.Context, s3Client *s3.Client, job Job, log *slo
 		"[v1metric][0:v]ssim=stats_file=-[ssimstats]"
 
 	cmd := exec.CommandContext(procCtx, "ffmpeg",
+		"-y",
 		"-i", tempInput,
 		"-filter_complex", filterComplex,
 		"-map", "[ssimstats]", "-f", "null", "-",
@@ -306,11 +322,19 @@ func processVideoABR(ctx context.Context, s3Client *s3.Client, job Job, log *slo
 		filepath.Join(outputDir, "%v", "playlist.m3u8"),
 	)
 
-	// Wire up the parser
-	cmd.Stderr = &FFmpegLogParser{FileID: job.FileID}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("failed to get stderr pipe: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("ffmpeg failed to start: %w", err)
+	}
+
+	go monitorFFmpegOutput(stderr, job.FileID)
 
 	logger.Info(ctx, log, "Starting ABR transcoding...")
-	if err := cmd.Run(); err != nil {
+	if err := cmd.Wait(); err != nil {
 		return fmt.Errorf("ffmpeg failed: %w", err)
 	}
 
