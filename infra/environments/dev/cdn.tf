@@ -19,6 +19,7 @@ resource "aws_cloudfront_distribution" "s3_distribution" {
   is_ipv6_enabled     = true
   comment             = "Eye of the Storm HLS CDN"
   default_root_object = "index.html"
+  aliases = ["${var.subdomain_label}.${var.root_domain}"]
 
   # Caching Behavior for HLS
   default_cache_behavior {
@@ -50,6 +51,8 @@ resource "aws_cloudfront_distribution" "s3_distribution" {
   }
 
   viewer_certificate {
-    cloudfront_default_certificate = true
+    acm_certificate_arn      = aws_acm_certificate_validation.cdn_cert.certificate_arn
+    ssl_support_method       = "sni-only"
+    minimum_protocol_version = "TLSv1.2_2021"
   }
 }

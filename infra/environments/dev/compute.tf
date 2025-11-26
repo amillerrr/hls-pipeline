@@ -122,7 +122,7 @@ resource "aws_ecs_task_definition" "api" {
         { name = "SQS_QUEUE_URL", value = aws_sqs_queue.video_queue.id },
         { name = "OTEL_EXPORTER_OTLP_ENDPOINT", value = "http://localhost:4317" },
         { name = "PROCESSED_BUCKET", value = aws_s3_bucket.processed.bucket },
-        { name = "CDN_DOMAIN", value = aws_cloudfront_distribution.s3_distribution.domain_name }
+        { name = "CDN_DOMAIN", value = "${var.subdomain_label}.${var.root_domain}" }
       ]
       logConfiguration = {
         logDriver = "awslogs"

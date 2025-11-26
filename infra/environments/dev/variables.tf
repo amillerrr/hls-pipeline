@@ -9,3 +9,15 @@ variable "project_name" {
   type        = string
   default     = "eye-of-storm"
 }
+
+variable "root_domain" {
+  description = "The root domain name"
+  type        = string
+  default     = "miller.today"
+}
+
+variable "subdomain_label" {
+  description = "The subdomain prefix"
+  type        = string
+  default     = "toptal"
+}

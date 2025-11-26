@@ -24,7 +24,7 @@
   <script>
     var video = document.getElementById('video');
     // Replace this with the Load Balancer DNS from Terraform Output
-    var apiEndpoint = 'http://ALB_DNS_NAME/latest'
+    var apiEndpoint = 'https://api.toptal.miller.today/latest'
 
     fetch(apiEndpoint) 
       .then(response => response.json())
@@ -61,7 +61,6 @@
         console.error("API Error:", err);
         document.body.innerHTML += "<h3>Error connecting to API. Check console output.</h3>";
       });
-    }
   </script>
 </body>
 </html>
