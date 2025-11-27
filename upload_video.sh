@@ -1,7 +1,6 @@
 #!/bin/bash
 
 if [ -f .env ]; then
-    echo "Loading configuration from .env..."
     set -a
     source .env
     set +a
@@ -20,59 +19,68 @@ if [ ! -f "$VIDEO_FILE" ]; then
     exit 1
 fi
 
-echo "Authenticating"
-set +e
-LOGIN_RESPONSE=$(curl -s -S -L -k -X POST -d "username=$USERNAME&password=$PASSWORD" "$BASE_URL/login" 2>&1)
-CURL_EXIT=$?
-set -e
+# Login
+echo "Authenticating..."
+LOGIN_RESPONSE=$(curl -s -k -X POST -d "username=$USERNAME&password=$PASSWORD" "$BASE_URL/login")
+TOKEN=$(echo "$LOGIN_RESPONSE" | grep -o '"token": *"[^"]*"' | cut -d'"' -f4)
 
-if [ $CURL_EXIT -ne 0 ]; then
-    echo "FAILED."
-    echo "Critical Error: Could not connect to API at $BASE_URL"
-    echo "Curl Output: $LOGIN_RESPONSE"
+if [ -z "$TOKEN" ] || [ "$TOKEN" == "null" ]; then
+    echo "Authentication failed."
+    echo "Response: $LOGIN_RESPONSE"
     exit 1
 fi
+echo "   Token acquired."
 
-TOKEN=$(echo "$LOGIN_RESPONSE" | grep -o '"token": *"[^"]*"' | grep -o '"[^"]*"$' | tr -d '"')
+# Init Upload
+echo "Initializing Upload..."
+FILENAME=$(basename "$VIDEO_FILE")
+CONTENT_TYPE="video/mp4"
 
-if [ -z "$TOKEN" ]; then
-    echo "FAILED."
-    echo "Error: Authentication failed."
-    echo "Server Response: $LOGIN_RESPONSE"
-    exit 1
-fi
-echo "Success."
-
-echo "Starting Upload..."
-set +e
-HTTP_CODE=$(curl -s -S -L -k -w "%{http_code}" -o response.json \
+INIT_RESPONSE=$(curl -s -k -X POST \
   -H "Authorization: Bearer $TOKEN" \
-  -F "video=@$VIDEO_FILE" \
-  "$BASE_URL/upload")
-CURL_EXIT=$?
-set -e
+  -H "Content-Type: application/json" \
+  -d "{\"filename\": \"$FILENAME\", \"contentType\": \"$CONTENT_TYPE\"}" \
+  "$BASE_URL/upload/init")
 
-if [ $CURL_EXIT -ne 0 ]; then
-    echo "FAILED."
-    echo "Error: Network failure during upload."
-    rm -f response.json
+UPLOAD_URL=$(echo "$INIT_RESPONSE" | jq -r '.uploadUrl')
+VIDEO_ID=$(echo "$INIT_RESPONSE" | jq -r '.videoId')
+KEY=$(echo "$INIT_RESPONSE" | jq -r '.key')
+
+if [ "$UPLOAD_URL" == "null" ]; then
+    echo "Init failed."
+    echo "Response: $INIT_RESPONSE"
     exit 1
 fi
+echo "   Video ID: $VIDEO_ID"
+
+# Direct S3 Upload
+echo "Uploading to S3 (Direct)..."
+curl -s -S -X PUT -T "$VIDEO_FILE" \
+  -H "Content-Type: $CONTENT_TYPE" \
+  "$UPLOAD_URL"
+
+if [ $? -ne 0 ]; then
+    echo "Upload failed."
+    exit 1
+fi
+echo "   Upload successful."
+
+# Complete Upload
+echo "Finalizing Job..."
+COMPLETE_RESPONSE=$(curl -s -k -w "%{http_code}" -o response.json -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"videoId\": \"$VIDEO_ID\", \"key\": \"$KEY\", \"filename\": \"$FILENAME\"}" \
+  "$BASE_URL/upload/complete")
+
+HTTP_CODE=$(tail -n1 <<< "$COMPLETE_RESPONSE")
 
 if [[ "$HTTP_CODE" -eq 202 ]]; then
-    echo "Success (HTTP 202)."
-    echo "Job ID: $(cat response.json | grep -o '"id": *"[^"]*"' | cut -d'"' -f4)"
-    echo "Full Response:"
-    cat response.json
-    echo ""
+    echo "Job Queued."
+    cat response.json | jq .
 else
-    echo "FAILED (HTTP $HTTP_CODE)."
+    echo "Finalization failed (HTTP $HTTP_CODE)."
     cat response.json
-    echo ""
-    rm -f response.json
-    exit 1
 fi
 
 rm -f response.json
-echo "Done."
-
