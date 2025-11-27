@@ -85,7 +85,7 @@ func main() {
 		Handler:      mux,
 		ReadTimeout:  30 * time.Second,
 		ReadHeaderTimeout: 10 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		WriteTimeout: 300 * time.Second,
 		IdleTimeout: 120 * time.Second,
 		MaxHeaderBytes: 1 << 20,
 	}
@@ -103,7 +103,7 @@ func main() {
 	<-quit
 
 	logger.Info(context.Background(), log, "Shutting down server...")
-	ctxShut, cancelShut := context.WithTimeout(context.Background(), 5*time.Second)
+	ctxShut, cancelShut := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelShut()
 
 	if err := srv.Shutdown(ctxShut); err != nil {
@@ -148,29 +148,17 @@ func localOnlyMiddleware(next http.Handler) http.Handler {
 
 // Check if request is from localhost
 func isLocalRequest(remoteAddr string) bool {
-	localPrefixes := []string{
+		localPrefixes := []string{
 		"127.0.0.1:",
 		"localhost:",
-		// Private network (ECS internal)
-		"10.",       
-		"172.16.", 
-		"192.168.", 
-		// Docker network
-		"172.17.",   
-		"172.18.",  
-		"172.19.", 
-		"172.20.",
-		"172.21.",
-		"172.22.",
-		"172.23.",
-		"172.24.",
-		"172.25.",
-		"172.26.",
-		"172.27.",
-		"172.28.",
-		"172.29.",
-		"172.30.",
-		"172.31.",
+		"[::1]:",
+		// Private networks (ECS internal, VPC)
+		"10.",
+		"172.16.", "172.17.", "172.18.", "172.19.",
+		"172.20.", "172.21.", "172.22.", "172.23.",
+		"172.24.", "172.25.", "172.26.", "172.27.",
+		"172.28.", "172.29.", "172.30.", "172.31.",
+		"192.168.",
 	}
 
 	for _, prefix := range localPrefixes {

@@ -1,4 +1,3 @@
-# Security Group for the Load Balancer
 resource "aws_security_group" "lb_sg" {
   name        = "eye-lb-sg"
   description = "Security group for ALB"
@@ -36,9 +35,11 @@ resource "aws_security_group" "lb_sg" {
 # Load Balancer 
 resource "aws_lb" "main" {
   name               = "eye-alb"
+  internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.lb_sg.id]
   subnets            = [aws_subnet.public_1.id, aws_subnet.public_2.id]
+
   # Enable in production
   enable_deletion_protection = false
 
@@ -63,20 +64,14 @@ resource "aws_lb_target_group" "api" {
 
   health_check {
     enabled             = true
+    interval            = 30
     path                = "/health"
     port                = "traffic-port"
-    protocol            = "HTTP"
     healthy_threshold   = 2
     unhealthy_threshold = 3
     timeout             = 5
-    interval            = 30
+    protocol            = "HTTP"
     matcher             = "200"
-  }
-
-  stickiness {
-    type            = "lb_cookie"
-    cookie_duration = 86400
-    enabled         = false # Enable if you need session affinity
   }
 
   tags = {
@@ -87,12 +82,11 @@ resource "aws_lb_target_group" "api" {
 # HTTP Listener
 resource "aws_lb_listener" "front_end_http" {
   load_balancer_arn = aws_lb.main.arn
-  port              = "80"
+  port              = 80
   protocol          = "HTTP"
 
   default_action {
     type = "redirect"
-
     redirect {
       port        = "443"
       protocol    = "HTTPS"
@@ -104,9 +98,9 @@ resource "aws_lb_listener" "front_end_http" {
 # HTTPS Listener
 resource "aws_lb_listener" "front_end_https" {
   load_balancer_arn = aws_lb.main.arn
-  port              = "443"
+  port              = 443
   protocol          = "HTTPS"
-  ssl_policy        = "ELBSecurityPolicy-2016-08"
+  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
   certificate_arn   = aws_acm_certificate_validation.alb_cert.certificate_arn
 
   default_action {
@@ -122,7 +116,6 @@ resource "aws_lb_listener_rule" "block_metrics" {
 
   action {
     type = "fixed-response"
-
     fixed_response {
       content_type = "text/plain"
       message_body = "Forbidden"
@@ -132,7 +125,35 @@ resource "aws_lb_listener_rule" "block_metrics" {
 
   condition {
     path_pattern {
-      values = ["/metrics"]
+      values = ["/metrics", "/metrics/*"]
     }
   }
+}
+
+# Forward all other traffic to API
+resource "aws_lb_listener_rule" "api_forward" {
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 100
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.api.arn
+  }
+
+  condition {
+    path_pattern {
+      values = ["/*"]
+    }
+  }
+}
+
+# Output the ALB DNS name
+output "alb_dns_name" {
+  description = "DNS name of the Application Load Balancer"
+  value       = aws_lb.main.dns_name
+}
+
+output "alb_zone_id" {
+  description = "Zone ID of the Application Load Balancer"
+  value       = aws_lb.main.zone_id
 }

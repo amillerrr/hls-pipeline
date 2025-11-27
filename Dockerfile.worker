@@ -21,23 +21,21 @@ FROM alpine:3.22.2
 # Install runtime dependencies
 RUN apk add --no-cache ca-certificates tzdata
 
-WORKDIR /root/
+WORKDIR /app
 
-# Create temp dirs with permissions
 RUN addgroup -g 1000 appgroup && \
     adduser -u 1000 -G appgroup -D -h /app appuser && \
     mkdir -p /tmp/uploads /tmp/hls && \
-    chown -R appuser:appgroup /tmp/uploads /tmp/hls
+    chown -R appuser:appgroup /tmp/uploads /tmp/hls /app
 
-# Copy binary from builder
 COPY --from=builder /app/worker .
-
-# Copy FFmpeg binaries
 COPY --from=ffmpeg /ffmpeg /usr/local/bin/ffmpeg
 COPY --from=ffmpeg /ffprobe /usr/local/bin/ffprobe
 
-# Change ownership and user
-RUN chown -R appuser:appgroup /app
+# Ensure owned by appuser
+RUN chown appuser:appgroup /app/worker
+
+# Switch to non-root user
 USER appuser
 
 # Expose metrics port

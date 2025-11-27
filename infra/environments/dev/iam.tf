@@ -1,53 +1,128 @@
-# Worker Policy
-resource "aws_iam_policy" "worker_policy" {
-  name        = "eye-worker-policy"
-  description = "Allows worker to access S3, SQS, X-Ray, and CloudWatch"
+# ECS Execution Role 
+resource "aws_iam_role" "ecs_execution_role" {
+  name = "eye-ecs-execution-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "ecs-tasks.amazonaws.com"
+      }
+    }]
+  })
+
+  tags = {
+    Name = "eye-ecs-execution-role"
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_execution_role_policy" {
+  role       = aws_iam_role.ecs_execution_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+# API Task Role
+resource "aws_iam_role" "api_task_role" {
+  name = "eye-api-task-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "ecs-tasks.amazonaws.com"
+      }
+    }]
+  })
+
+  tags = {
+    Name = "eye-api-task-role"
+  }
+}
+
+# API S3 access for raw uploads bucket
+resource "aws_iam_role_policy" "api_s3_raw_access" {
+  name = "api-s3-raw-access"
+  role = aws_iam_role.api_task_role.id
 
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
-        Sid    = "S3RawAccess"
         Effect = "Allow"
         Action = [
+          "s3:PutObject",
           "s3:GetObject",
-          "s3:PutObject"
+          "s3:HeadObject",
+          "s3:DeleteObject"
         ]
         Resource = "${aws_s3_bucket.raw_ingest.arn}/*"
       },
       {
-        Sid    = "S3ProcessedAccess"
-        Effect = "Allow"
-        Action = [
-          "s3:PutObject",
-          "s3:PutObjectAcl",
-          "s3:ListBucket",
-          "s3:GetObject"
-        ]
-        Resource = "${aws_s3_bucket.processed.arn}/*"
-      },
-      {
-        Sid    = "S3ProcessedListAccess"
         Effect = "Allow"
         Action = [
           "s3:ListBucket"
         ]
-        Resource = aws_s3_bucket.processed.arn
-      },
+        Resource = aws_s3_bucket.raw_ingest.arn
+      }
+    ]
+  })
+}
+
+# API S3 read access for processed bucket 
+resource "aws_iam_role_policy" "api_s3_processed_read" {
+  name = "api-s3-processed-read"
+  role = aws_iam_role.api_task_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
       {
-        Sid    = "SQSAccess"
         Effect = "Allow"
         Action = [
-          "sqs:ReceiveMessage",
-          "sqs:SendMessage",
-          "sqs:DeleteMessage",
-          "sqs:GetQueueAttributes",
-          "sqs:GetQueueUrl"
+          "s3:GetObject",
+          "s3:HeadObject",
+          "s3:ListBucket"
         ]
-        Resource = aws_sqs_queue.video_queue.arn
-      },
+        Resource = [
+          aws_s3_bucket.processed.arn,
+          "${aws_s3_bucket.processed.arn}/*"
+        ]
+      }
+    ]
+  })
+}
+
+# API SQS send access
+resource "aws_iam_role_policy" "api_sqs_send" {
+  name = "api-sqs-send"
+  role = aws_iam_role.api_task_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "sqs:SendMessage",
+        "sqs:GetQueueAttributes"
+      ]
+      Resource = aws_sqs_queue.video_queue.arn
+    }]
+  })
+}
+
+# API CloudWatch permissions for metrics and tracing
+resource "aws_iam_role_policy" "api_observability" {
+  name = "api-observability"
+  role = aws_iam_role.api_task_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
       {
-        Sid    = "AllowXRayWrites"
         Effect = "Allow"
         Action = [
           "xray:PutTraceSegments",
@@ -59,23 +134,15 @@ resource "aws_iam_policy" "worker_policy" {
         Resource = "*"
       },
       {
-        Sid    = "AllowCloudWatchLogs"
         Effect = "Allow"
         Action = [
-          "logs:PutLogEvents",
           "logs:CreateLogStream",
-          "logs:CreateLogGroup",
-          "logs:DescribeLogStreams",
-          "logs:DescribeLogGroups"
+          "logs:PutLogEvents",
+          "logs:DescribeLogStreams"
         ]
-        Resource = [
-          "arn:aws:logs:${var.aws_region}:*:log-group:/aws/ecs/*",
-          "arn:aws:logs:${var.aws_region}:*:log-group:/ecs/*",
-          "arn:aws:logs:${var.aws_region}:*:log-group:/metrics/*"
-        ]
+        Resource = "${aws_cloudwatch_log_group.logs.arn}:*"
       },
       {
-        Sid    = "AllowCloudWatchMetrics"
         Effect = "Allow"
         Action = [
           "cloudwatch:PutMetricData"
@@ -91,61 +158,128 @@ resource "aws_iam_policy" "worker_policy" {
   })
 }
 
-# API Policy
-resource "aws_iam_policy" "api_policy" {
-  name        = "eye-api-policy"
-  description = "Allows API to access S3, SQS, X-Ray, and CloudWatch"
+# Worker Task Role
+resource "aws_iam_role" "worker_task_role" {
+  name = "eye-worker-task-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "ecs-tasks.amazonaws.com"
+      }
+    }]
+  })
+
+  tags = {
+    Name = "eye-worker-task-role"
+  }
+}
+
+# Worker S3 read access for raw uploads
+resource "aws_iam_role_policy" "worker_s3_raw_read" {
+  name = "worker-s3-raw-read"
+  role = aws_iam_role.worker_task_role.id
 
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
-        Sid    = "S3RawUpload"
         Effect = "Allow"
         Action = [
-          "s3:PutObject"
+          "s3:GetObject",
+          "s3:HeadObject"  
         ]
-        Resource = "${aws_s3_bucket.raw_ingest.arn}/uploads/*"
+        Resource = "${aws_s3_bucket.raw_ingest.arn}/*"
       },
       {
-        Sid    = "S3ProcessedList"
         Effect = "Allow"
         Action = [
           "s3:ListBucket"
         ]
-        Resource = aws_s3_bucket.processed.arn
-      },
+        Resource = aws_s3_bucket.raw_ingest.arn
+      }
+    ]
+  })
+}
+
+# Worker S3 write access for processed bucket
+resource "aws_iam_role_policy" "worker_s3_processed_write" {
+  name = "worker-s3-processed-write"
+  role = aws_iam_role.worker_task_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
       {
-        Sid    = "SQSSendOnly"
         Effect = "Allow"
         Action = [
-          "sqs:SendMessage",
-          "sqs:GetQueueUrl"
+          "s3:PutObject",
+          "s3:GetObject",
+          "s3:HeadObject",  
+          "s3:DeleteObject",
+          "s3:ListBucket"
         ]
-        Resource = aws_sqs_queue.video_queue.arn
-      },
+        Resource = [
+          aws_s3_bucket.processed.arn,
+          "${aws_s3_bucket.processed.arn}/*"
+        ]
+      }
+    ]
+  })
+}
+
+# Worker SQS consume access
+resource "aws_iam_role_policy" "worker_sqs_consume" {
+  name = "worker-sqs-consume"
+  role = aws_iam_role.worker_task_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "sqs:ReceiveMessage",
+        "sqs:DeleteMessage",
+        "sqs:GetQueueAttributes",
+        "sqs:ChangeMessageVisibility"
+      ]
+      Resource = aws_sqs_queue.video_queue.arn
+    }]
+  })
+}
+
+# Worker CloudWatch permissions for metrics and tracing
+resource "aws_iam_role_policy" "worker_observability" {
+  name = "worker-observability"
+  role = aws_iam_role.worker_task_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
       {
-        Sid    = "AllowXRayWrites"
         Effect = "Allow"
         Action = [
           "xray:PutTraceSegments",
           "xray:PutTelemetryRecords",
           "xray:GetSamplingRules",
-          "xray:GetSamplingTargets"
+          "xray:GetSamplingTargets",
+          "xray:GetSamplingStatisticSummaries"
         ]
         Resource = "*"
       },
       {
-        Sid    = "AllowCloudWatchLogs"
         Effect = "Allow"
         Action = [
+          "logs:CreateLogStream",
           "logs:PutLogEvents",
-          "logs:CreateLogStream"
+          "logs:DescribeLogStreams"
         ]
-        Resource = "arn:aws:logs:${var.aws_region}:*:log-group:/ecs/*:*"
+        Resource = "${aws_cloudwatch_log_group.logs.arn}:*"
       },
       {
-        Sid    = "AllowCloudWatchMetrics"
         Effect = "Allow"
         Action = [
           "cloudwatch:PutMetricData"
@@ -161,59 +295,144 @@ resource "aws_iam_policy" "api_policy" {
   })
 }
 
-# Trust Policy
-data "aws_iam_policy_document" "ecs_assume_role" {
-  statement {
-    actions = ["sts:AssumeRole"]
-    principals {
-      type        = "Service"
-      identifiers = ["ecs-tasks.amazonaws.com"]
-    }
-  }
-}
+# GitHub Actions OIDC Role 
 
-# Execution Role
-resource "aws_iam_role" "ecs_execution_role" {
-  name               = "eye-ecs-execution-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_assume_role.json
+# OIDC Provider 
+resource "aws_iam_openid_connect_provider" "github_actions" {
+  url             = "https://token.actions.githubusercontent.com"
+  client_id_list  = ["sts.amazonaws.com"]
+  thumbprint_list = ["6938fd4d98bab03faadb97b34396831e3780aea1"]
 
   tags = {
-    Name = "eye-ecs-execution-role"
+    Name = "github-actions-oidc"
   }
 }
 
-resource "aws_iam_role_policy_attachment" "ecs_execution_attach" {
-  role       = aws_iam_role.ecs_execution_role.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
-}
+# Role for GitHub Actions
+resource "aws_iam_role" "github_actions" {
+  name = "eye-github-actions-role"
 
-# Task Role
-resource "aws_iam_role" "ecs_task_role" {
-  name               = "eye-ecs-task-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_assume_role.json
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Federated = aws_iam_openid_connect_provider.github_actions.arn
+      }
+      Action = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+        }
+        StringLike = {
+          "token.actions.githubusercontent.com:sub" = "repo:${var.github_org}/${var.github_repo}:*"
+        }
+      }
+    }]
+  })
 
   tags = {
-    Name = "eye-ecs-task-role"
+    Name = "eye-github-actions-role"
   }
 }
 
-# Attach api and worker policy to the Task Role
-resource "aws_iam_role" "api_task_role" {
-  name               = "eye-api-task-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_assume_role.json
+# GitHub Actions ECR push access
+resource "aws_iam_role_policy" "github_actions_ecr" {
+  name = "github-actions-ecr"
+  role = aws_iam_role.github_actions.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "ecr:GetAuthorizationToken"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:BatchGetImage",
+          "ecr:InitiateLayerUpload",
+          "ecr:UploadLayerPart",
+          "ecr:CompleteLayerUpload",
+          "ecr:PutImage"
+        ]
+        Resource = [
+          aws_ecr_repository.api.arn,
+          aws_ecr_repository.worker.arn
+        ]
+      }
+    ]
+  })
 }
 
-resource "aws_iam_role_policy_attachment" "api_task_attach" {
-  role       = aws_iam_role.api_task_role.name
-  policy_arn = aws_iam_policy.api_policy.arn
+# GitHub Actions ECS deploy access
+resource "aws_iam_role_policy" "github_actions_ecs" {
+  name = "github-actions-ecs"
+  role = aws_iam_role.github_actions.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "ecs:UpdateService",
+          "ecs:DescribeServices",
+          "ecs:DescribeTaskDefinition",
+          "ecs:RegisterTaskDefinition",
+          "ecs:ListTasks",
+          "ecs:DescribeTasks"
+        ]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "ecs:cluster" = aws_ecs_cluster.main.arn
+          }
+        }
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ecs:RegisterTaskDefinition",
+          "ecs:DescribeTaskDefinition"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "iam:PassRole"
+        ]
+        Resource = [
+          aws_iam_role.ecs_execution_role.arn,
+          aws_iam_role.api_task_role.arn,
+          aws_iam_role.worker_task_role.arn
+        ]
+      }
+    ]
+  })
 }
 
-resource "aws_iam_role" "worker_task_role" {
-  name               = "eye-worker-task-role"
-  assume_role_policy = data.aws_iam_policy_document.ecs_assume_role.json
+# Outputs
+
+output "github_actions_role_arn" {
+  description = "ARN of the GitHub Actions IAM role for OIDC"
+  value       = aws_iam_role.github_actions.arn
 }
 
-resource "aws_iam_role_policy_attachment" "worker_task_attach" {
-  role       = aws_iam_role.worker_task_role.name
-  policy_arn = aws_iam_policy.worker_policy.arn
+output "api_task_role_arn" {
+  description = "ARN of the API task role"
+  value       = aws_iam_role.api_task_role.arn
 }
+
+output "worker_task_role_arn" {
+  description = "ARN of the Worker task role"
+  value       = aws_iam_role.worker_task_role.arn
+}
+

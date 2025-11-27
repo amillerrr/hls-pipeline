@@ -26,6 +26,30 @@ func Info(ctx context.Context, logger *slog.Logger, msg string, args ...any) {
 	logger.Info(msg, args...)
 }
 
+// Log Debug Trace ID and Span ID
+func Debug(ctx context.Context, logger *slog.Logger, msg string, args ...any) {
+	spanCtx := trace.SpanContextFromContext(ctx)
+	if spanCtx.IsValid() {
+		args = append(args,
+			"trace_id", spanCtx.TraceID().String(),
+			"span_id", spanCtx.SpanID().String(),
+		)
+	}
+	logger.Debug(msg, args...)
+}
+
+// Log Warn Trace ID and Span ID
+func Warn(ctx context.Context, logger *slog.Logger, msg string, args ...any) {
+	spanCtx := trace.SpanContextFromContext(ctx)
+	if spanCtx.IsValid() {
+		args = append(args,
+			"trace_id", spanCtx.TraceID().String(),
+			"span_id", spanCtx.SpanID().String(),
+		)
+	}
+	logger.Warn(msg, args...)
+}
+
 // Log an errors with Trace ID
 func Error(ctx context.Context, logger *slog.Logger, msg string, args ...any) {
 	spanCtx := trace.SpanContextFromContext(ctx)
