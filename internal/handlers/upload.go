@@ -34,7 +34,6 @@ var (
 	)
 )
 
-// APIHandler
 type APIHandler struct {
 	S3Client  *s3.Client
 	SQSClient *sqs.Client
@@ -54,6 +53,8 @@ func New(s3 *s3.Client, sqs *sqs.Client, queueURL string, logger *slog.Logger) *
 const MaxUploadSize = 500 << 20 // 500 MB
 
 func (h *APIHandler) LoginHandler(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+
 	user := r.FormValue("username")
 	pass := r.FormValue("password")
 
@@ -73,7 +74,6 @@ func (h *APIHandler) LoginHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *APIHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
-	// Start Tracing Span
 	ctx := r.Context()
 	tracer := otel.Tracer("api-handler")
 	ctx, span := tracer.Start(ctx, "process_upload_request")
@@ -81,13 +81,11 @@ func (h *APIHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	start := time.Now()
 	requestID := uuid.New().String()
-
 	reqLogger := h.Logger.With(
 		slog.String("req_id", requestID),
 		slog.String("method", r.Method),
 	)
 
-	// Validation Checks
 	if r.Method != http.MethodPost {
 		uploadOps.WithLabelValues("error_method").Inc()
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -109,7 +107,6 @@ func (h *APIHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// Upload to S3
 	fileUUID := uuid.New().String()
 	safeFilename := fmt.Sprintf("%s%s", fileUUID, filepath.Ext(header.Filename))
 	
@@ -129,13 +126,11 @@ func (h *APIHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Dispatch to SQS 
 	job := map[string]string{"file_id": safeFilename}
 	payload, _ := json.Marshal(job)
 
 	msgAttrs := make(map[string]types.MessageAttributeValue)
 	carrier := propagation.MapCarrier{}
-	
 	otel.GetTextMapPropagator().Inject(ctx, carrier)
 
 	for k, v := range carrier {
@@ -157,7 +152,6 @@ func (h *APIHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Log success
 	duration := time.Since(start)
 	logger.Info(ctx, reqLogger, "Ingest Complete", "filename", safeFilename, "duration", duration)
 	uploadOps.WithLabelValues("success").Inc()

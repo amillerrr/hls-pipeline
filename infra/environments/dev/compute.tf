@@ -123,7 +123,8 @@ resource "aws_ecs_task_definition" "api" {
         { name = "SQS_QUEUE_URL", value = aws_sqs_queue.video_queue.id },
         { name = "OTEL_EXPORTER_OTLP_ENDPOINT", value = "http://localhost:4317" },
         { name = "PROCESSED_BUCKET", value = aws_s3_bucket.processed.bucket },
-        { name = "CDN_DOMAIN", value = "${var.subdomain_label}.${var.root_domain}" }
+        { name = "CDN_DOMAIN", value = "${var.subdomain_label}.${var.root_domain}" },
+        { name = "ENV", value = "dev" }
       ]
       logConfiguration = {
         logDriver = "awslogs"
@@ -181,7 +182,8 @@ resource "aws_ecs_task_definition" "worker" {
         { name = "PROCESSED_BUCKET", value = aws_s3_bucket.processed.bucket },
         { name = "SQS_QUEUE_URL", value = aws_sqs_queue.video_queue.id },
         { name = "OTEL_EXPORTER_OTLP_ENDPOINT", value = "http://localhost:4317" },
-        { name = "MAX_CONCURRENT_JOBS", value = "1" }
+        { name = "MAX_CONCURRENT_JOBS", value = "1" },
+        { name = "ENV", value = "dev" }
 
       ]
       logConfiguration = {

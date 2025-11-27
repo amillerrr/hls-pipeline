@@ -45,6 +45,21 @@ resource "aws_s3_bucket_cors_configuration" "processed_cors" {
   }
 }
 
+resource "aws_s3_bucket_lifecycle_configuration" "raw_lifecycle" {
+  bucket = aws_s3_bucket.raw_ingest.id
+
+  rule {
+    id     = "cleanup-temp"
+    status = "Enabled"
+    filter {
+      prefix = "uploads/"
+    }
+    expiration {
+      days = 1 
+    }
+  }
+}
+
 # Allow CloudFront to read from the bucket
 data "aws_iam_policy_document" "cloudfront_oac_access" {
   statement {

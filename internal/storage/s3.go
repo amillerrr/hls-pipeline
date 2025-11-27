@@ -10,9 +10,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
-func NewS3Client() (*s3.Client, error) {
-	// Load default config
-	cfg, err := config.LoadDefaultConfig(context.TODO(),
+func NewS3Client(ctx context.Context) (*s3.Client, error) {
+	cfg, err := config.LoadDefaultConfig(ctx,
 		config.WithRegion(os.Getenv("AWS_REGION")),
 	)
 	if err != nil {

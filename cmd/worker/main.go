@@ -10,11 +10,14 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -58,6 +61,12 @@ var (
 	}, []string{"file_id"})
 )
 
+// Pre-compiled regex for performance 
+var (
+	reBitrate = regexp.MustCompile(`bitrate=\s*([\d\.]+)kbits/s`)
+	reSSIM    = regexp.MustCompile(`Y:([\d\.]+)`)
+)
+
 type Job struct {
 	FileID string `json:"file_id"`
 }
@@ -73,14 +82,11 @@ func main() {
 	// Load .env file
 	if err := godotenv.Load(); err != nil {
 		logger.Info(context.Background(), log, "No .env file found, relying on system ENV variables")
-	} else {
-		logger.Info(context.Background(), log, "Environment variables loaded from .env")
-	}
+	} 
 
-	// Inititialize Distributed Tracing
-	shutdown := observability.InitTracer(context.Background(), "eye-worker")
+	shutdownTracer := observability.InitTracer(context.Background(), "eye-worker")
 	defer func() {
-		if err := shutdown(context.Background()); err != nil {
+		if err := shutdownTracer(context.Background()); err != nil {
 			logger.Error(context.Background(), log, "Failed to shutdown tracer", "error", err)
 		}
 	}()
@@ -100,7 +106,7 @@ func main() {
 	}
 
 	// Initialize S3
-	s3Client, err := storage.NewS3Client()
+	s3Client, err := storage.NewS3Client(context.Background())
 	if err != nil {
 		logger.Error(context.Background(), log, "Failed to init S3", "error", err)
 		os.Exit(1)
@@ -118,72 +124,80 @@ func main() {
 
 	// Concurrency Limiter
 	maxConcurrency := 1
-	
-	// Allow override via env variable
 	if val := os.Getenv("MAX_CONCURRENT_JOBS"); val != "" {
 			if n, err := strconv.Atoi(val); err == nil && n > 0 {
 					maxConcurrency = n
-			} else {
-					logger.Info(context.Background(), log, "Invalid MAX_CONCURRENT_JOBS, defaulting to 1", "value", val)
-			}
+			} 
 	}
 
-	// Log the decision
 	logger.Info(context.Background(), log, "Worker started", 
 			"physical_cores", runtime.NumCPU(), 
 			"configured_concurrency", maxConcurrency,
 	)
 	
 	sem := make(chan token, maxConcurrency)
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+
+	var wg sync.WaitGroup
+	backoff := time.Second
 
 	for {
-		// Long Polling SQS
+		select {
+		case <-stop:
+			logger.Info(context.Background(), log, "Shutting down, waiting for active jobs...")
+			wg.Wait()
+			return
+		case sem <- token{}:
+		}
+
+		// Fetch from SQS
 		msgOutput, err := sqsClient.ReceiveMessage(context.TODO(), &sqs.ReceiveMessageInput{
 			QueueUrl:            aws.String(queueURL),
 			MaxNumberOfMessages: 1,
-			WaitTimeSeconds:     20,
-			VisibilityTimeout:   600,
-			MessageAttributeNames: []string{"All"},
+			WaitTimeSeconds:     5,
+			VisibilityTimeout:   960,
 		})
-		
+
 		if err != nil {
 			logger.Error(context.Background(), log, "SQS receive failed", "error", err)
-			time.Sleep(5 * time.Second)
+			<-sem 
+			time.Sleep(backoff)
+			if backoff < 30*time.Second {
+				backoff *= 2
+			}
 			continue
 		}
+
+		// Reset backoff on success
+		backoff = time.Second
 
 		if len(msgOutput.Messages) == 0 {
+			<-sem
 			continue
 		}
 
-		msg := msgOutput.Messages[0]
-
-		// Acquire Semaphore
-		sem <- token{}
+		// Process Job
+		wg.Add(1)
 		activeJobs.Inc()
-
 		go func(m types.Message) {
-			defer func() { 
-				<-sem 
-				activeJobs.Dec()
-			}()
+			defer wg.Done()
+			defer activeJobs.Dec()
+			defer func() { <-sem }()
 
+			ctx := context.Background()
 			carrier := propagation.MapCarrier{}
 			for k, v := range m.MessageAttributes {
 				if v.StringValue != nil {
 					carrier[k] = *v.StringValue
 				}
 			}
-
-			parentCtx := otel.GetTextMapPropagator().Extract(context.Background(), carrier)
-
-			// Start new Worker Span
+			parentCtx := otel.GetTextMapPropagator().Extract(ctx, carrier)
 			tracer := otel.Tracer("worker")
 			ctx, span := tracer.Start(parentCtx, "process_job",
 				trace.WithAttributes(attribute.String("sqs.message_id", *m.MessageId)))
 			defer span.End()
 
-			// Parse Job
 			var job Job
 			if err := json.Unmarshal([]byte(*m.Body), &job); err != nil {
 				logger.Error(ctx, log, "Invalid job format", "body", *m.Body)
@@ -194,14 +208,14 @@ func main() {
 			span.SetAttributes(attribute.String("job.file_id", job.FileID))
 			logger.Info(ctx, log, "Processing job started", "job_id", job.FileID)
 
-			// Transcode 
 			if err := processVideoABR(ctx, s3Client, job, log); err != nil {
 				logger.Error(ctx, log, "Job failed", "job_id", job.FileID, "error", err)
+				// Do NOT delete message; let VisibilityTimeout expire so it retries
 			} else {
 				logger.Info(ctx, log, "Job complete", "job_id", job.FileID)
 				deleteMessage(ctx, sqsClient, queueURL, m.ReceiptHandle, log)
 			}
-		}(msg)
+		}(msgOutput.Messages[0])
 	}
 }
 
@@ -217,8 +231,8 @@ func deleteMessage(ctx context.Context, client *sqs.Client, queueURL string, rec
 
 func monitorFFmpegOutput(stream io.ReadCloser, fileID string) {
 	scanner := bufio.NewScanner(stream)
-	reBitrate := regexp.MustCompile(`bitrate=\s*([\d\.]+)kbits/s`)
-	reSSIM := regexp.MustCompile(`Y:([\d\.]+)`)
+	buf := make([]byte, 0, 1024*1024)
+	scanner.Buffer(buf, 1024*1024)
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -243,15 +257,25 @@ func monitorFFmpegOutput(stream io.ReadCloser, fileID string) {
 			}
 		}
 
-		if !strings.Contains(line, "Y:") {
+		// Reduce log spam
+		if strings.Contains(line, "Y:") || !strings.Contains(line, "frame=") {
 			fmt.Fprintln(os.Stderr, line)
 		}
 	}
 }
 
 func processVideoABR(ctx context.Context, s3Client *s3.Client, job Job, log *slog.Logger) error {
-	start := time.Now()
+	outputKey := fmt.Sprintf("%s/master.m3u8", job.FileID)
+	_, err := s3Client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(os.Getenv("PROCESSED_BUCKET")),
+		Key:    aws.String(outputKey),
+	})
+	if err == nil {
+		logger.Info(ctx, log, "Job already processed, skipping", "job_id", job.FileID)
+		return nil
+	}
 
+	start := time.Now()
 	tracer := otel.Tracer("worker")
 	ctx, span := tracer.Start(ctx, "transcode_abr")
 	defer span.End()
@@ -263,20 +287,15 @@ func processVideoABR(ctx context.Context, s3Client *s3.Client, job Job, log *slo
 	// Prepare Paths
 	tempInput := filepath.Join("/tmp/uploads", job.FileID)
 	outputDir := filepath.Join("/tmp/hls", job.FileID)
-	
 	os.MkdirAll("/tmp/uploads", 0755)
 	os.MkdirAll(outputDir, 0755)
-	
 	defer os.Remove(tempInput)
 	defer os.RemoveAll(outputDir) 
 
 	// Download from S3
 	bucket := os.Getenv("S3_BUCKET")
-	if bucket == "" {
-		return fmt.Errorf("S3_BUCKET env var not set")
-	}
-
 	logger.Info(ctx, log, "Downloading raw video...", "key", "uploads/"+job.FileID)
+
 	destFile, err := os.Create(tempInput)
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
@@ -296,8 +315,7 @@ func processVideoABR(ctx context.Context, s3Client *s3.Client, job Job, log *slo
 		return fmt.Errorf("failed to write temp file: %w", err)
 	}
 
-	// ABR Transcode
-	// Variants: 1080p, 720p, 480p
+	// ABR Transcode with 720p Quality Check
 	filterComplex := "[0:v]split=3[v1][v2][v3];" +
 		"[v1]scale=w=1920:h=1080[v1out];" +
 		"[v2]scale=w=1280:h=720,split[v2out][v2metric];" +
@@ -310,21 +328,17 @@ func processVideoABR(ctx context.Context, s3Client *s3.Client, job Job, log *slo
 		"-i", tempInput,
 		"-filter_complex", filterComplex,
 		"-map", "[ssimstats]", "-f", "null", "-",
-		
 		// Stream 1: 1080p (High)
 		"-map", "[v1out]", "-c:v:0", "libx264", "-b:v:0", "4500k", "-maxrate:v:0", "5000k", "-bufsize:v:0", "7500k",
-		
 		// Stream 2: 720p (Med)
 		"-map", "[v2out]", "-c:v:1", "libx264", "-b:v:1", "2500k", "-maxrate:v:1", "2750k", "-bufsize:v:1", "3750k",
-		
 		// Stream 3: 480p (Low)
 		"-map", "[v3out]", "-c:v:2", "libx264", "-b:v:2", "1000k", "-maxrate:v:2", "1100k", "-bufsize:v:2", "1500k",
-		
-		// Audio (Copied to all streams)
+		// Audio (Copied to all streams) Commented since no audio in sample video
 		// "-map", "a:0", "-c:a", "aac", "-b:a", "128k", "-ac", "2",
-		
 		// HLS Settings
 		"-f", "hls",
+		// Uncomment if audio in file and comment out second line below
 		// "-var_stream_map", "v:0,a:0 v:1,a:0 v:2,a:0",
 		"-var_stream_map", "v:0 v:1 v:2",
 		"-master_pl_name", "master.m3u8",
@@ -335,13 +349,7 @@ func processVideoABR(ctx context.Context, s3Client *s3.Client, job Job, log *slo
 	)
 
 	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return fmt.Errorf("failed to get stderr pipe: %w", err)
-	}
 	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("failed to get stdout pipe: %w", err)
-	}
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("ffmpeg failed to start: %w", err)
@@ -350,56 +358,30 @@ func processVideoABR(ctx context.Context, s3Client *s3.Client, job Job, log *slo
 	go monitorFFmpegOutput(stderr, job.FileID)
 	go monitorFFmpegOutput(stdout, job.FileID)
 
-	logger.Info(ctx, log, "Starting ABR transcoding...")
 	if err := cmd.Wait(); err != nil {
 		return fmt.Errorf("ffmpeg failed: %w", err)
 	}
 
-	logger.Info(ctx, log, "Transcoding complete. Uploading to S3...")
-
-	// Upload Recursive Directory
 	processedBucket := os.Getenv("PROCESSED_BUCKET")
-	if processedBucket == "" {
-		return fmt.Errorf("PROCESSED_BUCKET env var not set")
-	}
-
-	err = uploadDirectoryToS3(procCtx, s3Client, outputDir, processedBucket, job.FileID)
-	if err != nil {
+	if err := uploadDirectoryToS3(procCtx, s3Client, outputDir, processedBucket, job.FileID); err != nil {
 		return fmt.Errorf("failed to upload HLS: %w", err)
 	}
 
-	duration := time.Since(start).Seconds()
-	transcodeDuration.Observe(duration)
-
+	transcodeDuration.Observe(time.Since(start).Seconds())
 	return nil
 }
 
 func uploadDirectoryToS3(ctx context.Context, s3Client *s3.Client, localDir, bucket, s3Prefix string) error {
 	return filepath.Walk(localDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			return nil
-		}
+		if err != nil { return err }
+		if info.IsDir() {	return nil }
 
-		// Get relative path
 		relPath, err := filepath.Rel(localDir, path)
-		if err != nil {
-			return err
-		}
-
-		// Create S3 Key
 		key := filepath.ToSlash(filepath.Join(s3Prefix, relPath))
-
-		// Open file
 		file, err := os.Open(path)
-		if err != nil {
-			return err
-		}
+		if err != nil { return err }
 		defer file.Close()
 
-		// Set Content-Type
 		contentType := "application/octet-stream"
 		switch filepath.Ext(path) {
 		case ".m3u8":
@@ -408,7 +390,6 @@ func uploadDirectoryToS3(ctx context.Context, s3Client *s3.Client, localDir, buc
 			contentType = "video/mp2t"
 		}
 
-		// Upload
 		_, err = s3Client.PutObject(ctx, &s3.PutObjectInput{
 			Bucket:      aws.String(bucket),
 			Key:         aws.String(key),

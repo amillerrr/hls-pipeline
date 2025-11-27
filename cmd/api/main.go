@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -21,58 +23,46 @@ import (
 )
 
 func main() {
-	// Initialize Logger
 	log := logger.New()
 	slog.SetDefault(log)
 
-	// Load .env
 	if err := godotenv.Load(); err != nil {
 		logger.Info(context.Background(), log, "No .env file found, relying on system ENV variables")
-	} else {
-		logger.Info(context.Background(), log, "Environment variables loaded from .env")
-	}
+	} 
 
-	// Initialize Distributed Tracing
-	shutdown := observability.InitTracer(context.Background(), "eye-api")
-	defer func() {
-		if err := shutdown(context.Background()); err != nil {
-			logger.Error(context.Background(), log, "Failed to shutdown tracer", "error", err)
-		}
-	}()
+	shutdownTracer := observability.InitTracer(context.Background(), "eye-api")
+	defer shutdownTracer(context.Background())
 
 	// Initialize AWS & SQS
-	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(os.Getenv("AWS_REGION")))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(os.Getenv("AWS_REGION")))
 	if err != nil {
 		logger.Error(context.Background(), log, "Failed to load AWS config", "error", err)
 		os.Exit(1)
 	}
 	otelaws.AppendMiddlewares(&cfg.APIOptions)
 	sqsClient := sqs.NewFromConfig(cfg)
-	
-	queueURL := os.Getenv("SQS_QUEUE_URL")
-	if queueURL == "" {
-		logger.Error(context.Background(), log, "SQS_QUEUE_URL is not set")
-		os.Exit(1)
-	}
 
 	// Initialize S3
-	s3Client, err := storage.NewS3Client()
+	s3Client, err := storage.NewS3Client(ctx)
 	if err != nil {
 		logger.Error(context.Background(), log, "Could not connect to S3", "error", err)
 		os.Exit(1)
 	}
 
-	// Dependency Injection
-	api := handlers.New(s3Client, sqsClient, queueURL, log)
+	api := handlers.New(s3Client, sqsClient, os.Getenv("SQS_QUEUE_URL"), log)
 
 	// Routing
 	mux := http.NewServeMux()
 	mux.HandleFunc("/login", api.LoginHandler)
 	mux.HandleFunc("/upload", auth.AuthMiddleware(api.UploadHandler))
 	mux.HandleFunc("/latest", api.GetLatestVideoHandler)
-	mux.Handle("/metrics", promhttp.Handler())
+	mux.Handle("/metrics", auth.AuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		promhttp.Handler().ServeHTTP(w, r)
+	}))
 
-	// Start Server
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -85,8 +75,22 @@ func main() {
 		WriteTimeout: 10 * time.Second,
 	}
 
-	logger.Info(context.Background(), log, "Starting API Server", "port", port, "mode", "AWS_Hybrid")
-	if err := srv.ListenAndServe(); err != nil {
-		logger.Error(context.Background(), log, "Server failed", "error", err)
+	// Graceful Shutdown 
+	go func() {
+		logger.Info(context.Background(), log, "Starting API Server", "port", port)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error(context.Background(), log, "Server error", "error", err)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+	<-quit
+
+	logger.Info(context.Background(), log, "Shutting down server...")
+	ctxShut, cancelShut := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelShut()
+	if err := srv.Shutdown(ctxShut); err != nil {
+		logger.Error(context.Background(), log, "Server forced to shutdown", "error", err)
 	}
 }

@@ -9,7 +9,7 @@ resource "aws_sqs_queue" "video_queue" {
   max_message_size          = 2048
   message_retention_seconds = 86400 # 1 day
   receive_wait_time_seconds = 10
-  visibility_timeout_seconds = 600
+  visibility_timeout_seconds = 960
 
   redrive_policy = jsonencode({
     deadLetterTargetArn = aws_sqs_queue.video_dlq.arn

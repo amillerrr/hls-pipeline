@@ -10,19 +10,25 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-var jwtKey = []byte(os.Getenv("JWT_SECRET"))
+var jwtKey []byte
+
+func init() {
+	secret := os.Getenv("JWT_SECRET")
+	if secret == "" {
+		if os.Getenv("ENV") == "prod" {
+			panic("FATAL: JWT_SECRET environment variable is not set")
+		}
+		secret = "default_secret_do_not_use_in_prod"
+	}
+	jwtKey = []byte(secret)
+}
 
 type Claims struct {
 	Username string `json:"username"`
 	jwt.RegisteredClaims
 }
 
-// Create a JWT valid for 24 hours
 func GenerateToken(username string) (string, error) {
-	if len(jwtKey) == 0 {
-		jwtKey = []byte("default_secret_do_not_use_in_prod") 
-	}
-
 	expirationTime := time.Now().Add(24 * time.Hour)
 	claims := &Claims{
 		Username: username,
@@ -36,17 +42,14 @@ func GenerateToken(username string) (string, error) {
 	return token.SignedString(jwtKey)
 }
 
-// Middleware for endpoints
 func AuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Get header: "Authorization: Bearer <token>"
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
 			http.Error(w, "Authorization header missing", http.StatusUnauthorized)
 			return
 		}
 
-		// Parse parts
 		parts := strings.Split(authHeader, " ")
 		if len(parts) != 2 || parts[0] != "Bearer" {
 			http.Error(w, "Invalid authorization format", http.StatusUnauthorized)
@@ -54,7 +57,6 @@ func AuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 		tokenString := parts[1]
 
-		// Validate Token
 		claims := &Claims{}
 		token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (any, error) {
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
@@ -68,7 +70,6 @@ func AuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		// Pass through to the next handler
 		next.ServeHTTP(w, r)
 	}
 }
