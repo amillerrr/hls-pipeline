@@ -332,10 +332,6 @@ resource "aws_cloudwatch_metric_alarm" "worker_backlog" {
   evaluation_periods  = 1
   threshold           = 0
   
-  # Check every 1 minute
-  period              = 60
-  statistic           = "Average" 
-  
   # Trigger scaling action
   alarm_actions       = [aws_appautoscaling_policy.worker_scale_out.arn]
   ok_actions          = [aws_appautoscaling_policy.worker_scale_in.arn]
@@ -389,6 +385,7 @@ resource "aws_appautoscaling_policy" "worker_scale_out" {
 
     step_adjustment {
       metric_interval_lower_bound = 0
+      metric_interval_upper_bound = 10
       scaling_adjustment          = 1  # Add 1 worker if backlog > 0
     }
     
