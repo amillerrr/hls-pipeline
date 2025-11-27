@@ -26,7 +26,7 @@ RUN addgroup -g 1000 appgroup && \
 
 # Copy the binary from the builder stage
 COPY --from=builder /app/api-server .
-RUN chown appuser:appgroup /app/api
+RUN chown appuser:appgroup /app/api-server
 
 # Switch to non-root user
 USER appuser

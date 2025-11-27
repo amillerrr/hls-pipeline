@@ -31,13 +31,13 @@ variable "environment" {
 variable "github_org" {
   description = "GitHub organization name for OIDC"
   type        = string
-  # No default - must be provided
+  default     = "amillerrr"
 }
 
 variable "github_repo" {
   description = "GitHub repository name for OIDC"
   type        = string
-  default     = "https://github.com/amillerrr/hls-pipeline.git"
+  default     = "hls-pipeline"
 }
 
 variable "alert_email" {
