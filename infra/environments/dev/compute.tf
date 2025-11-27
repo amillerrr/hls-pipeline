@@ -325,29 +325,96 @@ resource "aws_appautoscaling_target" "worker" {
   service_namespace  = "ecs"
 }
 
-# Scale based on SQS queue depth
-resource "aws_appautoscaling_policy" "worker_sqs_scaling" {
-  name               = "worker-sqs-scaling"
-  policy_type        = "TargetTrackingScaling"
+# CloudWatch Metric Query
+resource "aws_cloudwatch_metric_alarm" "worker_backlog" {
+  alarm_name          = "eye-worker-backlog-scale-out"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  threshold           = 0
+  
+  # Check every 1 minute
+  period              = 60
+  statistic           = "Average" 
+  
+  # Trigger scaling action
+  alarm_actions       = [aws_appautoscaling_policy.worker_scale_out.arn]
+  ok_actions          = [aws_appautoscaling_policy.worker_scale_in.arn]
+
+  metric_query {
+    id          = "e1"
+    expression  = "visible + invisible"
+    label       = "TotalBacklog"
+    return_data = true
+  }
+
+  metric_query {
+    id = "visible"
+    metric {
+      metric_name = "ApproximateNumberOfMessagesVisible"
+      namespace   = "AWS/SQS"
+      period      = 60
+      stat        = "Average"
+      dimensions = {
+        QueueName = aws_sqs_queue.video_queue.name
+      }
+    }
+  }
+
+  metric_query {
+    id = "invisible"
+    metric {
+      metric_name = "ApproximateNumberOfMessagesNotVisible"
+      namespace   = "AWS/SQS"
+      period      = 60
+      stat        = "Average"
+      dimensions = {
+        QueueName = aws_sqs_queue.video_queue.name
+      }
+    }
+  }
+}
+
+# Scale OUT Policy 
+resource "aws_appautoscaling_policy" "worker_scale_out" {
+  name               = "worker-scale-out"
+  policy_type        = "StepScaling"
   resource_id        = aws_appautoscaling_target.worker.resource_id
   scalable_dimension = aws_appautoscaling_target.worker.scalable_dimension
   service_namespace  = aws_appautoscaling_target.worker.service_namespace
 
-  target_tracking_scaling_policy_configuration {
-    target_value       = 2.0 # Target 2 messages per worker
-    scale_in_cooldown  = 300
-    scale_out_cooldown = 60
+  step_scaling_policy_configuration {
+    adjustment_type         = "ChangeInCapacity"
+    cooldown                = 60
+    metric_aggregation_type = "Average"
 
-    customized_metric_specification {
-      metric_name = "ApproximateNumberOfMessagesVisible"
-      namespace   = "AWS/SQS"
-      statistic   = "Average"
-      unit        = "Count"
+    step_adjustment {
+      metric_interval_lower_bound = 0
+      scaling_adjustment          = 1  # Add 1 worker if backlog > 0
+    }
+    
+    step_adjustment {
+      metric_interval_lower_bound = 10
+      scaling_adjustment          = 2  # Add 2 workers if backlog > 10
+    }
+  }
+}
 
-      dimensions {
-        name  = "QueueName"
-        value = aws_sqs_queue.video_queue.name
-      }
+# Scale IN Policy 
+resource "aws_appautoscaling_policy" "worker_scale_in" {
+  name               = "worker-scale-in"
+  policy_type        = "StepScaling"
+  resource_id        = aws_appautoscaling_target.worker.resource_id
+  scalable_dimension = aws_appautoscaling_target.worker.scalable_dimension
+  service_namespace  = aws_appautoscaling_target.worker.service_namespace
+
+  step_scaling_policy_configuration {
+    adjustment_type         = "ChangeInCapacity"
+    cooldown                = 300 # Wait 5 minutes before scaling in
+    metric_aggregation_type = "Average"
+
+    step_adjustment {
+      metric_interval_upper_bound = 0
+      scaling_adjustment          = -1 # Remove 1 worker if backlog is 0
     }
   }
 }

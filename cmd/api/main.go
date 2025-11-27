@@ -70,7 +70,8 @@ func main() {
 	mux.HandleFunc("/latest", api.GetLatestVideoHandler)
 
 	// Protected endpoints
-	mux.HandleFunc("/upload", auth.AuthMiddleware(api.UploadHandler))
+	mux.HandleFunc("/upload/init", auth.AuthMiddleware(api.InitUploadHandler))
+	mux.HandleFunc("/upload/complete", auth.AuthMiddleware(api.CompleteUploadHandler))
 
 	// Metrics endpoint
 	mux.Handle("/metrics", localOnlyMiddleware(promhttp.Handler()))

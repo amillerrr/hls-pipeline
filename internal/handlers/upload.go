@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -21,6 +20,7 @@ import (
 
 	"github.com/amillerrr/hls-pipeline/internal/auth"
 	"github.com/amillerrr/hls-pipeline/internal/logger"
+	"github.com/amillerrr/hls-pipeline/internal/storage"
 )
 
 var tracer = otel.Tracer("eye-api")
@@ -28,13 +28,13 @@ var tracer = otel.Tracer("eye-api")
 const maxUploadSize = 500 << 20 // 500 MB
 
 type API struct {
-	s3Client    *s3.Client
+	s3Client    *storage.Client
 	sqsClient   *sqs.Client
 	sqsQueueURL string
 	log         *slog.Logger
 }
 
-func New(s3 *s3.Client, sqsClient *sqs.Client, sqsQueueURL string, log *slog.Logger) *API {
+func New(s3 *storage.Client, sqsClient *sqs.Client, sqsQueueURL string, log *slog.Logger) *API {
 	return &API{
 		s3Client:    s3,
 		sqsClient:   sqsClient,
@@ -74,10 +74,7 @@ func (a *API) LoginHandler(w http.ResponseWriter, r *http.Request) {
 		expectedPassword = "secret"
 	}
 
-	usernameMatch := subtle.ConstantTimeCompare([]byte(username), []byte(expectedUsername)) == 1
-	passwordMatch := subtle.ConstantTimeCompare([]byte(password), []byte(expectedPassword)) == 1
-
-	if !usernameMatch || !passwordMatch {
+	if username != expectedUsername || password != expectedPassword {
 		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
 		return
 	}
@@ -95,115 +92,115 @@ func (a *API) LoginHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (a *API) UploadHandler(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+// Request payload for Init
+type InitUploadRequest struct {
+	Filename    string `json:"filename"`
+	ContentType string `json:"contentType"`
+}
 
-	// Handle CORS preflight
-	if r.Method == http.MethodOptions {
-		a.handleCORSPreflight(w, r)
-		return
-	}
+// Response payload for Init
+type InitUploadResponse struct {
+	UploadURL string `json:"uploadUrl"`
+	VideoID   string `json:"videoId"`
+	Key       string `json:"key"`
+}
+
+// Generate Presigned URL
+func (a *API) InitUploadHandler(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	ctx, span := tracer.Start(ctx, "upload-handler",
-		trace.WithAttributes(attribute.String("handler", "upload")))
+	ctx, span := tracer.Start(ctx, "init-upload-handler",
+		trace.WithAttributes(attribute.String("handler", "init-upload")))
 	defer span.End()
 
-	// Limit request body size
-	r.Body = http.MaxBytesReader(w, r.Body, maxUploadSize)
-
-	if err := r.ParseMultipartForm(32 << 20); err != nil {
-		logger.Error(ctx, a.log, "Failed to parse multipart form", "error", err)
-		http.Error(w, "File too large or invalid form", http.StatusBadRequest)
+	var req InitUploadRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
-	defer r.MultipartForm.RemoveAll()
-
-	file, header, err := r.FormFile("video")
-	if err != nil {
-		logger.Error(ctx, a.log, "Failed to get form file", "error", err)
-		http.Error(w, "Failed to get uploaded file", http.StatusBadRequest)
-		return
-	}
-	defer file.Close()
 
 	// Validate file extension
-	ext := strings.ToLower(filepath.Ext(header.Filename))
+	ext := strings.ToLower(filepath.Ext(req.Filename))
 	allowedExts := map[string]bool{
-		".mp4":  true,
-		".mov":  true,
-		".avi":  true,
-		".mkv":  true,
-		".webm": true,
+		".mp4": true, ".mov": true, ".avi": true, ".mkv": true, ".webm": true,
 	}
 	if !allowedExts[ext] {
 		http.Error(w, "Invalid file type. Allowed: mp4, mov, avi, mkv, webm", http.StatusBadRequest)
 		return
 	}
 
-	// Validate content type
-	contentType := header.Header.Get("Content-Type")
-	allowedTypes := map[string]bool{
-		"video/mp4":        true,
-		"video/quicktime":  true,
-		"video/x-msvideo":  true,
-		"video/x-matroska": true,
-		"video/webm":       true,
-	}
-	if contentType != "" && !allowedTypes[contentType] {
-		// Read first 512 bytes
-		buf := make([]byte, 512)
-		n, _ := file.Read(buf)
-		detectedType := http.DetectContentType(buf[:n])
-		file.Seek(0, 0) // Reset file pointer
-
-		if !strings.HasPrefix(detectedType, "video/") {
-			http.Error(w, "Invalid content type", http.StatusBadRequest)
-			return
-		}
-	}
-
 	// Generate unique key
 	videoID := uuid.New().String()
 	s3Key := fmt.Sprintf("uploads/%s%s", videoID, ext)
-
-	span.SetAttributes(
-		attribute.String("video.id", videoID),
-		attribute.String("video.filename", header.Filename),
-		attribute.Int64("video.size", header.Size),
-	)
-
-	// Upload to S3 using the request context
 	bucket := os.Getenv("S3_BUCKET")
-	_, err = a.s3Client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket:        aws.String(bucket),
-		Key:           aws.String(s3Key),
-		Body:          file,
-		ContentType:   aws.String(contentType),
-		ContentLength: aws.Int64(header.Size),
-	})
+
+	// Generate Presigned URL 
+	url, err := a.s3Client.GeneratePresignedURL(ctx, bucket, s3Key, req.ContentType, 15*time.Minute)
 	if err != nil {
-		logger.Error(ctx, a.log, "Failed to upload to S3", "error", err, "key", s3Key)
-		http.Error(w, "Failed to upload file", http.StatusInternalServerError)
+		logger.Error(ctx, a.log, "Failed to generate presigned URL", "error", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	logger.Info(ctx, a.log, "File uploaded to S3",
-		"key", s3Key,
-		"size", header.Size,
-		"videoId", videoID,
-	)
+	logger.Info(ctx, a.log, "Generated presigned URL", "videoId", videoID, "key", s3Key)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(InitUploadResponse{
+		UploadURL: url,
+		VideoID:   videoID,
+		Key:       s3Key,
+	})
+}
+
+type CompleteUploadRequest struct {
+	VideoID  string `json:"videoId"`
+	Key      string `json:"key"`
+	Filename string `json:"filename"`
+}
+
+// Queue the Job
+func (a *API) CompleteUploadHandler(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ctx, span := tracer.Start(ctx, "complete-upload-handler",
+		trace.WithAttributes(attribute.String("handler", "complete-upload")))
+	defer span.End()
+
+	var req CompleteUploadRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	bucket := os.Getenv("S3_BUCKET")
+
+	// Verify file exists in S3 before queuing
+	_, err := a.s3Client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(req.Key),
+	})
+	if err != nil {
+		logger.Warn(ctx, a.log, "File not found in S3 during completion", "key", req.Key, "error", err)
+		http.Error(w, "Video file not found in S3", http.StatusNotFound)
+		return
+	}
 
 	// Queue processing job
 	message := map[string]string{
-		"videoId":  videoID,
-		"s3Key":    s3Key,
+		"videoId":  req.VideoID,
+		"s3Key":    req.Key,
 		"bucket":   bucket,
-		"filename": header.Filename,
+		"filename": req.Filename,
 	}
 	messageBytes, _ := json.Marshal(message)
 
@@ -212,17 +209,19 @@ func (a *API) UploadHandler(w http.ResponseWriter, r *http.Request) {
 		MessageBody: aws.String(string(messageBytes)),
 	})
 	if err != nil {
-		logger.Error(ctx, a.log, "Failed to queue processing job", "error", err, "videoId", videoID)
+		logger.Error(ctx, a.log, "Failed to queue processing job", "error", err, "videoId", req.VideoID)
+		http.Error(w, "Failed to queue job", http.StatusInternalServerError)
+		return
 	}
 
-	logger.Info(ctx, a.log, "Processing job queued", "videoId", videoID)
+	logger.Info(ctx, a.log, "Processing job queued", "videoId", req.VideoID)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]string{
-		"videoId": videoID,
+		"videoId": req.VideoID,
 		"status":  "processing",
-		"message": "Video uploaded successfully and queued for processing",
+		"message": "Video queued for processing",
 	})
 }
 

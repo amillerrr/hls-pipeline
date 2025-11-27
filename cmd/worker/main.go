@@ -204,7 +204,6 @@ func (w *Worker) pollQueue(ctx context.Context) {
 				if err := w.processMessage(ctx, msg); err != nil {
 					logger.Error(ctx, w.log, "Failed to process message", "error", err)
 					videosProcessed.WithLabelValues("failed").Inc()
-					// Don't delete message - let it retry or go to DLQ
 				} else {
 					// Delete message on success
 					_, delErr := w.sqsClient.DeleteMessage(ctx, &sqs.DeleteMessageInput{
@@ -365,7 +364,6 @@ func (w *Worker) runFFmpeg(ctx context.Context, inputPath, hlsDir string) error 
 
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 
-	// FIXED: Proper error handling - capture both pipes before starting
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
 		return fmt.Errorf("failed to get stderr pipe: %w", err)
@@ -380,11 +378,10 @@ func (w *Worker) runFFmpeg(ctx context.Context, inputPath, hlsDir string) error 
 		return fmt.Errorf("failed to start ffmpeg: %w", err)
 	}
 
-	// FIXED: Use WaitGroup to properly manage goroutines
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// Monitor stderr (FFmpeg outputs progress here)
+	// Monitor stderr
 	go func() {
 		defer wg.Done()
 		w.monitorFFmpegOutput(ctx, stderrPipe)
@@ -398,8 +395,6 @@ func (w *Worker) runFFmpeg(ctx context.Context, inputPath, hlsDir string) error 
 
 	// Wait for command to complete
 	cmdErr := cmd.Wait()
-
-	// Wait for goroutines to finish reading pipes
 	wg.Wait()
 
 	if cmdErr != nil {
@@ -445,23 +440,28 @@ func (w *Worker) calculateQualityMetrics(ctx context.Context, inputPath, hlsDir 
 	defer span.End()
 
 	// Extract a frame from 720p output and compare to source
-	// This gives us a quality metric for the transcoding
 	refFrame := filepath.Join(hlsDir, "ref_frame.png")
 	distFrame := filepath.Join(hlsDir, "dist_frame.png")
 
-	// Extract frame from source
-	exec.CommandContext(ctx, "ffmpeg", "-y", "-i", inputPath,
-		"-vf", "select=eq(n\\,100),scale=1280:720",
-		"-vframes", "1", refFrame).Run()
-
-	// Extract frame from 720p output
-	playlist720 := filepath.Join(hlsDir, "720p.m3u8")
-	exec.CommandContext(ctx, "ffmpeg", "-y", "-i", playlist720,
-		"-vf", "select=eq(n\\,100)",
-		"-vframes", "1", distFrame).Run()
-
 	defer os.Remove(refFrame)
 	defer os.Remove(distFrame)
+
+	// Extract frame from source
+	err := exec.CommandContext(ctx, "ffmpeg", "-y", "-ss", "00:00:01", "-i", inputPath,
+		"-vf", "scale=1280:720", "-vframes", "1", refFrame).Run()
+	if err != nil {
+		logger.Warn(ctx, w.log, "Failed to extract reference frame (video too short?)", "error", err)
+		return
+	}
+
+	// Extract frame from 720p output at 1s
+	playlist720 := filepath.Join(hlsDir, "720p.m3u8")
+	err = exec.CommandContext(ctx, "ffmpeg", "-y", "-ss", "00:00:01", "-i", playlist720,
+		"-vframes", "1", distFrame).Run()
+	if err != nil {
+		logger.Warn(ctx, w.log, "Failed to extract dist frame", "error", err)
+		return
+	}
 
 	// Calculate SSIM
 	ssimCmd := exec.CommandContext(ctx, "ffmpeg",
