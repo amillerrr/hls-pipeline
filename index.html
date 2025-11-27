@@ -23,15 +23,14 @@
 
   <script>
     var video = document.getElementById('video');
-    // Replace this with the Load Balancer DNS from Terraform Output
     var apiEndpoint = 'https://api.toptal.miller.today/latest'
 
     fetch(apiEndpoint) 
       .then(response => response.json())
       .then(data => {
-        if (data.stream_url) {
-          console.log("Loading latest video:", data.file_id);
-          var videoSrc = data.stream_url;
+        if (data.playbackUrl) {
+          console.log("Loading latest video:", data.videoId);
+          var videoSrc = data.playbackUrl;
           
           if (Hls.isSupported()) {
             var hls = new Hls({

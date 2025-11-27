@@ -21,3 +21,27 @@ variable "subdomain_label" {
   type        = string
   default     = "toptal"
 }
+
+variable "environment" {
+  description = "Environment name (dev, staging, prod)"
+  type        = string
+  default     = "dev"
+}
+
+variable "github_org" {
+  description = "GitHub organization name for OIDC"
+  type        = string
+  # No default - must be provided
+}
+
+variable "github_repo" {
+  description = "GitHub repository name for OIDC"
+  type        = string
+  default     = "https://github.com/amillerrr/hls-pipeline.git"
+}
+
+variable "alert_email" {
+  description = "Email address for CloudWatch alarm notifications"
+  type        = string
+  default     = "andrew@mill3r.la"
+}

@@ -80,7 +80,7 @@ resource "aws_lb_target_group" "api" {
 }
 
 # HTTP Listener
-resource "aws_lb_listener" "front_end_http" {
+resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.main.arn
   port              = 80
   protocol          = "HTTP"
@@ -96,7 +96,7 @@ resource "aws_lb_listener" "front_end_http" {
 }
 
 # HTTPS Listener
-resource "aws_lb_listener" "front_end_https" {
+resource "aws_lb_listener" "https" {
   load_balancer_arn = aws_lb.main.arn
   port              = 443
   protocol          = "HTTPS"
@@ -111,7 +111,7 @@ resource "aws_lb_listener" "front_end_https" {
 
 # Block external source access to /metrics
 resource "aws_lb_listener_rule" "block_metrics" {
-  listener_arn = aws_lb_listener.front_end_https.arn
+  listener_arn = aws_lb_listener.https.arn
   priority     = 1
 
   action {
