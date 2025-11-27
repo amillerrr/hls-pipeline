@@ -1,17 +1,46 @@
+# Stage 1: Builder
 FROM golang:1.25.4-alpine AS builder
+
 WORKDIR /app
+
+# Download dependencies
 COPY go.mod go.sum ./
 RUN go mod download
-COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o worker ./cmd/worker
 
+COPY . .
+
+# Build worker binary
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o worker ./cmd/worker
+
+# Stage 2: FFmpeg from static build
 FROM mwader/static-ffmpeg:8.0.1 AS ffmpeg
 
-# Final Stage
-FROM alpine:latest
+# Stage 3: Build final image
+FROM alpine:3.22.2
+
+# Install runtime dependencies
+RUN apk add --no-cache ca-certificates tzdata
+
 WORKDIR /root/
+
+# Create temp dirs with permissions
+RUN addgroup -g 1000 appgroup && \
+    adduser -u 1000 -G appgroup -D -h /app appuser && \
+    mkdir -p /tmp/uploads /tmp/hls && \
+    chown -R appuser:appgroup /tmp/uploads /tmp/hls
+
+# Copy binary from builder
 COPY --from=builder /app/worker .
+
+# Copy FFmpeg binaries
 COPY --from=ffmpeg /ffmpeg /usr/local/bin/ffmpeg
 COPY --from=ffmpeg /ffprobe /usr/local/bin/ffprobe
-RUN apk add --no-cache ca-certificates
+
+# Change ownership and user
+RUN chown -R appuser:appgroup /app
+USER appuser
+
+# Expose metrics port
+EXPOSE 2112
+
 CMD ["./worker"]

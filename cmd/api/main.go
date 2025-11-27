@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"os"
@@ -31,7 +32,13 @@ func main() {
 	} 
 
 	shutdownTracer := observability.InitTracer(context.Background(), "eye-api")
-	defer shutdownTracer(context.Background())
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownTracer(shutdownCtx); err != nil {
+			logger.Error(context.Background(), log, "Failed to shutdown tracer", "error", err)
+		}
+	}()
 
 	// Initialize AWS & SQS
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -56,12 +63,17 @@ func main() {
 
 	// Routing
 	mux := http.NewServeMux()
+
+	// Public endpoints
+	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/login", api.LoginHandler)
-	mux.HandleFunc("/upload", auth.AuthMiddleware(api.UploadHandler))
 	mux.HandleFunc("/latest", api.GetLatestVideoHandler)
-	mux.Handle("/metrics", auth.AuthMiddleware(func(w http.ResponseWriter, r *http.Request) {
-		promhttp.Handler().ServeHTTP(w, r)
-	}))
+
+	// Protected endpoints
+	mux.HandleFunc("/upload", auth.AuthMiddleware(api.UploadHandler))
+	
+	// Metrics endpoint
+	mux.Handle("/metrics", localOnlyMiddleware(promhttp.Handler()))
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -71,8 +83,11 @@ func main() {
 	srv := &http.Server{
 		Addr:         ":" + port,
 		Handler:      mux,
-		ReadTimeout:  10 * time.Second,
+		ReadTimeout:  30 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second,
 		WriteTimeout: 10 * time.Second,
+		IdleTimeout: 120 * time.Second,
+		MaxHeaderBytes: 1 << 20,
 	}
 
 	// Graceful Shutdown 
@@ -90,7 +105,78 @@ func main() {
 	logger.Info(context.Background(), log, "Shutting down server...")
 	ctxShut, cancelShut := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelShut()
+
 	if err := srv.Shutdown(ctxShut); err != nil {
 		logger.Error(context.Background(), log, "Server forced to shutdown", "error", err)
 	}
+
+	logger.Info(context.Background(), log, "Server shutdown complete")
+}
+
+// ALB health check
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+
+	response := map[string]string{
+		"status":  "healthy",
+		"service": "eye-api",
+	}
+	json.NewEncoder(w).Encode(response)
+}
+
+// Restrict access to localhost
+func localOnlyMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		remoteAddr := r.RemoteAddr
+
+		// Allow localhost connections (sidecar)
+		if isLocalRequest(remoteAddr) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		if r.Header.Get("X-Forwarded-For") == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Deny non-local requests
+		http.Error(w, "Forbidden", http.StatusForbidden)
+	})
+}
+
+// Check if request is from localhost
+func isLocalRequest(remoteAddr string) bool {
+	localPrefixes := []string{
+		"127.0.0.1:",
+		"localhost:",
+		// Private network (ECS internal)
+		"10.",       
+		"172.16.", 
+		"192.168.", 
+		// Docker network
+		"172.17.",   
+		"172.18.",  
+		"172.19.", 
+		"172.20.",
+		"172.21.",
+		"172.22.",
+		"172.23.",
+		"172.24.",
+		"172.25.",
+		"172.26.",
+		"172.27.",
+		"172.28.",
+		"172.29.",
+		"172.30.",
+		"172.31.",
+	}
+
+	for _, prefix := range localPrefixes {
+		if len(remoteAddr) >= len(prefix) && remoteAddr[:len(prefix)] == prefix {
+			return true
+		}
+	}
+	return false
 }

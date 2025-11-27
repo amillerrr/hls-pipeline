@@ -19,7 +19,7 @@ resource "aws_cloudfront_distribution" "s3_distribution" {
   is_ipv6_enabled     = true
   comment             = "Eye of the Storm HLS CDN"
   default_root_object = "index.html"
-  aliases = ["${var.subdomain_label}.${var.root_domain}"]
+  aliases             = ["${var.subdomain_label}.${var.root_domain}"]
 
   # Caching Behavior for HLS
   default_cache_behavior {

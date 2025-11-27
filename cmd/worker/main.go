@@ -36,7 +36,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/amillerrr/hls-pipeline/internal/observability"
-	"github.com/amillerrr/hls-pipeline/internal/storage"
 	"github.com/amillerrr/hls-pipeline/internal/logger"
 )
 
@@ -59,6 +58,10 @@ var (
 		Name: "transcode_bitrate_kbps",
 		Help: "Current bitrate of the transcoding process",
 	}, []string{"file_id"})
+	jobsProcessed = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "worker_jobs_total",
+		Help: "Total number of jobs processed",
+	}, []string{"status"})
 )
 
 // Pre-compiled regex for performance 
@@ -84,15 +87,23 @@ func main() {
 		logger.Info(context.Background(), log, "No .env file found, relying on system ENV variables")
 	} 
 
+	rootCtx, rootCancel := context.WithCancel(context.Background())
+	defer rootCancel()
+
 	shutdownTracer := observability.InitTracer(context.Background(), "eye-worker")
 	defer func() {
-		if err := shutdownTracer(context.Background()); err != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownTracer(shutdownCtx); err != nil {
 			logger.Error(context.Background(), log, "Failed to shutdown tracer", "error", err)
 		}
 	}()
 
 	// AWS Config and SQS Initialization
-	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(os.Getenv("AWS_REGION")))
+	initCtx, initCancel := context.WithTimeout(rootCtx, 30*time.Second)
+	defer initCancel()
+
+	cfg, err := config.LoadDefaultConfig(initCtx, config.WithRegion(os.Getenv("AWS_REGION")))
 	if err != nil {
 		logger.Error(context.Background(), log, "Failed to load AWS config", "error", err)
 		os.Exit(1)
@@ -106,18 +117,22 @@ func main() {
 	}
 
 	// Initialize S3
-	s3Client, err := storage.NewS3Client(context.Background())
+	s3Client, err := newS3ClientFromConfig(initCtx, cfg)
 	if err != nil {
 		logger.Error(context.Background(), log, "Failed to init S3", "error", err)
 		os.Exit(1)
 	}
 
 	// Metrics Server
+	metricsServer := &http.Server{
+		Addr:         ":2112",
+		Handler:      promhttp.Handler(),
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 10 * time.Second,
+	}
 	go func() {
-		metricsPort := ":2112"
-		logger.Info(context.Background(), log, "Starting Metrics Server", "port", metricsPort)
-		http.Handle("/metrics", promhttp.Handler())
-		if err := http.ListenAndServe(metricsPort, nil); err != nil {
+		logger.Info(rootCtx, log, "Starting Metrics Server", "port", ":2112")
+		if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error(context.Background(), log, "Metrics server failed", "error", err)
 		}
 	}()
@@ -130,7 +145,7 @@ func main() {
 			} 
 	}
 
-	logger.Info(context.Background(), log, "Worker started", 
+	logger.Info(rootCtx, log, "Worker started", 
 			"physical_cores", runtime.NumCPU(), 
 			"configured_concurrency", maxConcurrency,
 	)
@@ -142,26 +157,51 @@ func main() {
 	var wg sync.WaitGroup
 	backoff := time.Second
 
+	go func() {
+		<-stop
+		logger.Info(rootCtx, log, "Received shutdown signal, stopping...")
+		rootCancel()
+	}()
+
 	for {
 		select {
-		case <-stop:
+		case <-rootCtx.Done():
 			logger.Info(context.Background(), log, "Shutting down, waiting for active jobs...")
 			wg.Wait()
+
+			// Shutdown metrics server gracefully
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+				logger.Error(context.Background(), log, "Failed to shutdown metrics server", "error", err)
+			}
+			cancel()
+
+			logger.Info(context.Background(), log, "Shutdown complete")
 			return
 		case sem <- token{}:
 		}
 
+		if rootCtx.Err() != nil {
+			<-sem
+			continue
+		}
+
 		// Fetch from SQS
-		msgOutput, err := sqsClient.ReceiveMessage(context.TODO(), &sqs.ReceiveMessageInput{
+		msgOutput, err := sqsClient.ReceiveMessage(rootCtx, &sqs.ReceiveMessageInput{
 			QueueUrl:            aws.String(queueURL),
 			MaxNumberOfMessages: 1,
 			WaitTimeSeconds:     5,
 			VisibilityTimeout:   960,
+			MessageAttributeNames: []string{"All"},
 		})
 
 		if err != nil {
-			logger.Error(context.Background(), log, "SQS receive failed", "error", err)
-			<-sem 
+			if rootCtx.Err() != nil {
+				<-sem
+				continue
+			}
+			logger.Error(rootCtx, log, "SQS receive failed", "error", err)
+			<-sem
 			time.Sleep(backoff)
 			if backoff < 30*time.Second {
 				backoff *= 2
@@ -185,14 +225,13 @@ func main() {
 			defer activeJobs.Dec()
 			defer func() { <-sem }()
 
-			ctx := context.Background()
 			carrier := propagation.MapCarrier{}
 			for k, v := range m.MessageAttributes {
 				if v.StringValue != nil {
 					carrier[k] = *v.StringValue
 				}
 			}
-			parentCtx := otel.GetTextMapPropagator().Extract(ctx, carrier)
+			parentCtx := otel.GetTextMapPropagator().Extract(rootCtx, carrier)
 			tracer := otel.Tracer("worker")
 			ctx, span := tracer.Start(parentCtx, "process_job",
 				trace.WithAttributes(attribute.String("sqs.message_id", *m.MessageId)))
@@ -201,6 +240,7 @@ func main() {
 			var job Job
 			if err := json.Unmarshal([]byte(*m.Body), &job); err != nil {
 				logger.Error(ctx, log, "Invalid job format", "body", *m.Body)
+				jobsProcessed.WithLabelValues("invalid_format").Inc()
 				deleteMessage(ctx, sqsClient, queueURL, m.ReceiptHandle, log)
 				return
 			}
@@ -210,17 +250,33 @@ func main() {
 
 			if err := processVideoABR(ctx, s3Client, job, log); err != nil {
 				logger.Error(ctx, log, "Job failed", "job_id", job.FileID, "error", err)
-				// Do NOT delete message; let VisibilityTimeout expire so it retries
+				jobsProcessed.WithLabelValues("failed").Inc()
 			} else {
 				logger.Info(ctx, log, "Job complete", "job_id", job.FileID)
+				jobsProcessed.WithLabelValues("success").Inc()
 				deleteMessage(ctx, sqsClient, queueURL, m.ReceiptHandle, log)
 			}
 		}(msgOutput.Messages[0])
 	}
 }
 
+// Create S3 client from config
+func newS3ClientFromConfig(ctx context.Context, cfg aws.Config) (*s3.Client, error) {
+	endpoint := os.Getenv("S3_ENDPOINT")
+	if endpoint != "" {
+		return s3.NewFromConfig(cfg, func(o *s3.Options) {
+			o.BaseEndpoint = aws.String(endpoint)
+			o.UsePathStyle = true // Required for MinIO
+		}), nil
+	}
+	return s3.NewFromConfig(cfg), nil
+}
+
 func deleteMessage(ctx context.Context, client *sqs.Client, queueURL string, receiptHandle *string, log *slog.Logger) {
-	_, err := client.DeleteMessage(context.TODO(), &sqs.DeleteMessageInput{
+	deleteCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err := client.DeleteMessage(deleteCtx, &sqs.DeleteMessageInput{
 		QueueUrl:      aws.String(queueURL),
 		ReceiptHandle: receiptHandle,
 	})
@@ -229,12 +285,21 @@ func deleteMessage(ctx context.Context, client *sqs.Client, queueURL string, rec
 	}
 }
 
-func monitorFFmpegOutput(stream io.ReadCloser, fileID string) {
+func monitorFFmpegOutput(ctx context.Context, stream io.ReadCloser, fileID string, wg *sync.WaitGroup, log *slog.Logger) {
+	defer wg.Done()
+
 	scanner := bufio.NewScanner(stream)
 	buf := make([]byte, 0, 1024*1024)
 	scanner.Buffer(buf, 1024*1024)
 
 	for scanner.Scan() {
+		// Check for context cancellation
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
 		line := scanner.Text()
 
 		// Parse Bitrate
@@ -252,19 +317,26 @@ func monitorFFmpegOutput(stream io.ReadCloser, fileID string) {
 			matches := reSSIM.FindStringSubmatch(line)
 			if len(matches) > 1 {
 				if val, err := strconv.ParseFloat(matches[1], 64); err == nil {
-					videoQuality.WithLabelValues(fileID, "1080p").Set(val)
+					videoQuality.WithLabelValues(fileID, "720p_vs_source").Set(val)
 				}
 			}
 		}
 
-		// Reduce log spam
+		// Log dubugging
 		if strings.Contains(line, "Y:") || !strings.Contains(line, "frame=") {
 			fmt.Fprintln(os.Stderr, line)
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		if ctx.Err() == nil {
+			logger.Error(ctx, log, "Scanner error reading FFmpeg output", "error", err)
 		}
 	}
 }
 
 func processVideoABR(ctx context.Context, s3Client *s3.Client, job Job, log *slog.Logger) error {
+	// Check for existing output (idempotency)
 	outputKey := fmt.Sprintf("%s/master.m3u8", job.FileID)
 	_, err := s3Client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(os.Getenv("PROCESSED_BUCKET")),
@@ -287,8 +359,13 @@ func processVideoABR(ctx context.Context, s3Client *s3.Client, job Job, log *slo
 	// Prepare Paths
 	tempInput := filepath.Join("/tmp/uploads", job.FileID)
 	outputDir := filepath.Join("/tmp/hls", job.FileID)
-	os.MkdirAll("/tmp/uploads", 0755)
-	os.MkdirAll(outputDir, 0755)
+
+	if err := os.MkdirAll("/tmp/uploads", 0755); err != nil {
+		return fmt.Errorf("failed to create upload dir: %w", err)
+	}
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return fmt.Errorf("failed to create output dir: %w", err)
+	}
 	defer os.Remove(tempInput)
 	defer os.RemoveAll(outputDir) 
 
@@ -300,19 +377,21 @@ func processVideoABR(ctx context.Context, s3Client *s3.Client, job Job, log *slo
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
-	defer destFile.Close() 
 
 	resp, err := s3Client.GetObject(procCtx, &s3.GetObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String("uploads/" + job.FileID),
 	})
 	if err != nil {
+		destFile.Close()
 		return fmt.Errorf("failed to download: %w", err)
 	}
-	defer resp.Body.Close()
 
-	if _, err := io.Copy(destFile, resp.Body); err != nil {
-		return fmt.Errorf("failed to write temp file: %w", err)
+	_, err = io.Copy(destFile, resp.Body)
+		resp.Body.Close()
+		destFile.Close()
+		if err != nil {
+			return fmt.Errorf("failed to write temp file: %w", err)
 	}
 
 	// ABR Transcode with 720p Quality Check
@@ -349,37 +428,71 @@ func processVideoABR(ctx context.Context, s3Client *s3.Client, job Job, log *slo
 	)
 
 	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("failed to get stderr pipe: %w", err)
+	}
+
 	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("failed to get stdout pipe: %w", err)
+	}
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("ffmpeg failed to start: %w", err)
 	}
 
-	go monitorFFmpegOutput(stderr, job.FileID)
-	go monitorFFmpegOutput(stdout, job.FileID)
+	var monitorWg sync.WaitGroup
+	monitorWg.Add(2)
+	go monitorFFmpegOutput(procCtx, stderr, job.FileID, &monitorWg, log)
+	go monitorFFmpegOutput(procCtx, stdout, job.FileID, &monitorWg, log)
 
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("ffmpeg failed: %w", err)
+	cmdErr := cmd.Wait()
+	monitorWg.Wait()
+
+	if cmdErr != nil {
+		if procCtx.Err() != nil {
+			return fmt.Errorf("ffmpeg cancelled: %w", procCtx.Err())
+		}
+		return fmt.Errorf("ffmpeg failed: %w", cmdErr)
 	}
 
+	// Upload to S3
 	processedBucket := os.Getenv("PROCESSED_BUCKET")
 	if err := uploadDirectoryToS3(procCtx, s3Client, outputDir, processedBucket, job.FileID); err != nil {
 		return fmt.Errorf("failed to upload HLS: %w", err)
 	}
 
-	transcodeDuration.Observe(time.Since(start).Seconds())
+	duration := time.Since(start)
+	transcodeDuration.Observe(duration.Seconds())
+	logger.Info(ctx, log, "Transcode completed", "duration", duration, "job_id", job.FileID)
+
 	return nil
 }
 
 func uploadDirectoryToS3(ctx context.Context, s3Client *s3.Client, localDir, bucket, s3Prefix string) error {
 	return filepath.Walk(localDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil { return err }
-		if info.IsDir() {	return nil }
+		if err != nil { 
+			return err 
+		}
+		if info.IsDir() {	
+			return nil 
+		}
+
+		// Check context before each upload
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 
 		relPath, err := filepath.Rel(localDir, path)
+		if err != nil {
+			return fmt.Errorf("failed to get relative path: %w", err)
+		}
+
 		key := filepath.ToSlash(filepath.Join(s3Prefix, relPath))
 		file, err := os.Open(path)
-		if err != nil { return err }
+		if err != nil {
+			return fmt.Errorf("failed to open file %s: %w", path, err)
+		}
 		defer file.Close()
 
 		contentType := "application/octet-stream"
@@ -396,6 +509,10 @@ func uploadDirectoryToS3(ctx context.Context, s3Client *s3.Client, localDir, buc
 			Body:        file,
 			ContentType: aws.String(contentType),
 		})
+		if err != nil {
+			return fmt.Errorf("failed to upload %s: %w", key, err)
+		}
+
 		return err
 	})
 }

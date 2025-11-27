@@ -18,7 +18,35 @@ env:
   CONTAINER_NAME_API: api
   CONTAINER_NAME_WORKER: worker
 
+permissions:
+  id-token: write
+  contents: read
+  security-events: write
+
 jobs:
+  security:
+    name: "Security Scan"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Run Gosec Security Scanner
+        uses: securego/gosec@master
+        with:
+          args: '-no-fail -fmt sarif -out results.sarif ./...'
+
+      - name: Upload SARIF file
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: results.sarif
+        if: always()
+
   # Continuous Integration Step
   test:
     name: "Unit Tests"
@@ -32,19 +60,54 @@ jobs:
         with:
           go-version: '1.25'
 
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Download Dependencies
+        run: go mod download
+
       - name: Run Tests
-        run: |
-          go test -v ./...
+        run: go test -v -race -coverprofile=coverage.out ./...
+
+      - name: Upload Coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.out
+          fail_ci_if_error: false
+        continue-on-error: true
+
+  # Lint Step
+  lint:
+    name: "Lint"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v4
+        with:
+          version: latest
+          args: --timeout=5m
 
   # Continuous Delivery Stage
   deploy:
     name: "Build & Deploy"
-    needs: test
-    if: github.ref == 'refs/heads/main'
+    needs: [test, lint, security]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write 
-      contents: read
 
     steps:
       - name: Checkout Code
@@ -53,8 +116,7 @@ jobs:
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
@@ -68,7 +130,12 @@ jobs:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY_API:$IMAGE_TAG -t $ECR_REGISTRY/$ECR_REPOSITORY_API:latest -f Dockerfile .
+          docker build \
+            --build-arg BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ') \
+            --build-arg VCS_REF=${{ github.sha }} \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY_API:$IMAGE_TAG \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY_API:latest \
+            -f Dockerfile .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY_API:$IMAGE_TAG
           docker push $ECR_REGISTRY/$ECR_REPOSITORY_API:latest
           echo "image=$ECR_REGISTRY/$ECR_REPOSITORY_API:$IMAGE_TAG" >> $GITHUB_OUTPUT
@@ -80,10 +147,32 @@ jobs:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY_WORKER:$IMAGE_TAG -t $ECR_REGISTRY/$ECR_REPOSITORY_WORKER:latest -f Dockerfile.worker .
+          docker build \
+            --build-arg BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ') \
+            --build-arg VCS_REF=${{ github.sha }} \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY_WORKER:$IMAGE_TAG \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY_WORKER:latest \
+            -f Dockerfile.worker .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY_WORKER:$IMAGE_TAG
           docker push $ECR_REGISTRY/$ECR_REPOSITORY_WORKER:latest
           echo "image=$ECR_REGISTRY/$ECR_REPOSITORY_WORKER:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      # Scan images for vulnerabilities
+      - name: Scan API Image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY_API }}:${{ github.sha }}
+          format: 'sarif'
+          output: 'trivy-api-results.sarif'
+          severity: 'CRITICAL,HIGH'
+        continue-on-error: true
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-api-results.sarif'
+        if: always()
+        continue-on-error: true
 
       # Deploy api to ECS
       - name: Download API Task Definition

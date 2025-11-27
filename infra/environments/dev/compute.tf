@@ -3,7 +3,7 @@ locals {
     receivers = {
       otlp = {
         protocols = {
-          grpc = { endpoint = "0.0.0.0:4317" } 
+          grpc = { endpoint = "0.0.0.0:4317" }
           http = { endpoint = "0.0.0.0:4318" }
         }
       }
@@ -26,9 +26,9 @@ locals {
     }
     exporters = {
       awsxray = { region = var.aws_region }
-      awsemf  = {
-        region    = var.aws_region
-        namespace = "EyeOfTheStorm"
+      awsemf = {
+        region                  = var.aws_region
+        namespace               = "EyeOfTheStorm"
         dimension_rollup_option = "NoDimensionRollup"
       }
     }
@@ -69,15 +69,16 @@ locals {
 
 # Security Group for the api and worker
 resource "aws_security_group" "task_sg" {
-  name   = "eye-task-sg"
-  vpc_id = aws_vpc.main.id
+  name        = "eye-task-sg"
+  description = "Security group for ECS tasks"
+  vpc_id      = aws_vpc.main.id
 
   # Allow Traffic only from the Load Balancer
   ingress {
     protocol        = "tcp"
     from_port       = 8080
     to_port         = 8080
-    security_groups = [aws_security_group.lb_sg.id] 
+    security_groups = [aws_security_group.lb_sg.id]
   }
 
   # Allow all outbound
@@ -87,19 +88,32 @@ resource "aws_security_group" "task_sg" {
     to_port     = 0
     cidr_blocks = ["0.0.0.0/0"]
   }
+
+  tags = {
+    Name = "eye-task-sg"
+  }
 }
 
-# --- ECS Cluster ---
+# ECS Cluster 
 resource "aws_ecs_cluster" "main" {
   name = "eye-cluster"
+
+  setting {
+    name  = "containerInsights"
+    value = "enabled"
+  }
 }
 
 resource "aws_cloudwatch_log_group" "logs" {
   name              = "/ecs/eye-logs"
   retention_in_days = 7
+
+  tags = {
+    Application = "eye-of-storm"
+  }
 }
 
-# --- Task Definitions ---
+# Task Definitions
 
 # API Task
 resource "aws_ecs_task_definition" "api" {
@@ -113,10 +127,14 @@ resource "aws_ecs_task_definition" "api" {
 
   container_definitions = jsonencode([
     {
-      name  = "api"
-      image = "${aws_ecr_repository.api.repository_url}:latest"
+      name      = "api"
+      image     = "${aws_ecr_repository.api.repository_url}:latest"
+      essential = true
       dependsOn = [{ containerName = "aws-otel-collector", condition = "START" }]
-      portMappings = [{ containerPort = 8080 }]
+      portMappings = [{
+        containerPort = 8080
+        protocol      = "tcp"
+      }]
       environment = [
         { name = "AWS_REGION", value = var.aws_region },
         { name = "S3_BUCKET", value = aws_s3_bucket.raw_ingest.bucket },
@@ -124,7 +142,9 @@ resource "aws_ecs_task_definition" "api" {
         { name = "OTEL_EXPORTER_OTLP_ENDPOINT", value = "http://localhost:4317" },
         { name = "PROCESSED_BUCKET", value = aws_s3_bucket.processed.bucket },
         { name = "CDN_DOMAIN", value = "${var.subdomain_label}.${var.root_domain}" },
-        { name = "ENV", value = "dev" }
+        { name = "ENV", value = "dev" },
+        { name = "API_USERNAME", value = "admin" },
+        { name = "API_PASSWORD", value = "changeme-use-secrets-manager" }
       ]
       logConfiguration = {
         logDriver = "awslogs"
@@ -133,6 +153,13 @@ resource "aws_ecs_task_definition" "api" {
           "awslogs-region"        = var.aws_region
           "awslogs-stream-prefix" = "api"
         }
+      }
+      healthCheck = {
+        command     = ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1"]
+        interval    = 30
+        timeout     = 5
+        retries     = 3
+        startPeriod = 60
       }
     },
     {
@@ -156,6 +183,7 @@ resource "aws_ecs_task_definition" "api" {
       }
     }
   ])
+
   lifecycle {
     ignore_changes = [container_definitions]
   }
@@ -173,8 +201,9 @@ resource "aws_ecs_task_definition" "worker" {
 
   container_definitions = jsonencode([
     {
-      name  = "worker"
-      image = "${aws_ecr_repository.worker.repository_url}:latest"
+      name      = "worker"
+      image     = "${aws_ecr_repository.worker.repository_url}:latest"
+      essential = true
       dependsOn = [{ containerName = "aws-otel-collector", condition = "START" }]
       environment = [
         { name = "AWS_REGION", value = var.aws_region },
@@ -216,19 +245,20 @@ resource "aws_ecs_task_definition" "worker" {
       }
     }
   ])
+
   lifecycle {
     ignore_changes = [container_definitions]
   }
 }
 
-# --- Services ---
+# Services
 
 resource "aws_ecs_service" "api" {
-  name            = "eye-api-svc"
-  cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.api.arn
-  desired_count   = 1
-  wait_for_steady_state = false
+  name                              = "eye-api-svc"
+  cluster                           = aws_ecs_cluster.main.id
+  task_definition                   = aws_ecs_task_definition.api.arn
+  desired_count                     = 1
+  wait_for_steady_state             = false
   health_check_grace_period_seconds = 60
 
   capacity_provider_strategy {
@@ -253,24 +283,115 @@ resource "aws_ecs_service" "api" {
     container_name   = "api"
     container_port   = 8080
   }
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
 }
 
 resource "aws_ecs_service" "worker" {
-  name            = "eye-worker-svc"
-  cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.worker.arn
-  desired_count   = 1
-  wait_for_steady_state = false
+  name                              = "eye-worker-svc"
+  cluster                           = aws_ecs_cluster.main.id
+  task_definition                   = aws_ecs_task_definition.worker.arn
+  desired_count                     = 1
+  wait_for_steady_state             = false
   health_check_grace_period_seconds = 60
 
   capacity_provider_strategy {
     capacity_provider = "FARGATE_SPOT"
-    weight            = 100 
+    weight            = 100
   }
 
   network_configuration {
     subnets          = [aws_subnet.public_1.id, aws_subnet.public_2.id]
     security_groups  = [aws_security_group.task_sg.id]
     assign_public_ip = true
+  }
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+}
+
+resource "aws_appautoscaling_target" "worker" {
+  max_capacity       = 10
+  min_capacity       = 1
+  resource_id        = "service/${aws_ecs_cluster.main.name}/${aws_ecs_service.worker.name}"
+  scalable_dimension = "ecs:service:DesiredCount"
+  service_namespace  = "ecs"
+}
+
+# Scale based on SQS queue depth
+resource "aws_appautoscaling_policy" "worker_sqs_scaling" {
+  name               = "worker-sqs-scaling"
+  policy_type        = "TargetTrackingScaling"
+  resource_id        = aws_appautoscaling_target.worker.resource_id
+  scalable_dimension = aws_appautoscaling_target.worker.scalable_dimension
+  service_namespace  = aws_appautoscaling_target.worker.service_namespace
+
+  target_tracking_scaling_policy_configuration {
+    target_value       = 2.0 # Target 2 messages per worker
+    scale_in_cooldown  = 300
+    scale_out_cooldown = 60
+
+    customized_metric_specification {
+      metric_name = "ApproximateNumberOfMessagesVisible"
+      namespace   = "AWS/SQS"
+      statistic   = "Average"
+      unit        = "Count"
+
+      dimensions {
+        name  = "QueueName"
+        value = aws_sqs_queue.video_queue.name
+      }
+    }
+  }
+}
+
+# Scale based on CPU utilization as a secondary metric
+resource "aws_appautoscaling_policy" "worker_cpu_scaling" {
+  name               = "worker-cpu-scaling"
+  policy_type        = "TargetTrackingScaling"
+  resource_id        = aws_appautoscaling_target.worker.resource_id
+  scalable_dimension = aws_appautoscaling_target.worker.scalable_dimension
+  service_namespace  = aws_appautoscaling_target.worker.service_namespace
+
+  target_tracking_scaling_policy_configuration {
+    target_value       = 70.0
+    scale_in_cooldown  = 300
+    scale_out_cooldown = 60
+
+    predefined_metric_specification {
+      predefined_metric_type = "ECSServiceAverageCPUUtilization"
+    }
+  }
+}
+
+# Auto scaling for API for high traffic scenarios
+resource "aws_appautoscaling_target" "api" {
+  max_capacity       = 5
+  min_capacity       = 1
+  resource_id        = "service/${aws_ecs_cluster.main.name}/${aws_ecs_service.api.name}"
+  scalable_dimension = "ecs:service:DesiredCount"
+  service_namespace  = "ecs"
+}
+
+resource "aws_appautoscaling_policy" "api_cpu_scaling" {
+  name               = "api-cpu-scaling"
+  policy_type        = "TargetTrackingScaling"
+  resource_id        = aws_appautoscaling_target.api.resource_id
+  scalable_dimension = aws_appautoscaling_target.api.scalable_dimension
+  service_namespace  = aws_appautoscaling_target.api.service_namespace
+
+  target_tracking_scaling_policy_configuration {
+    target_value       = 70.0
+    scale_in_cooldown  = 300
+    scale_out_cooldown = 60
+
+    predefined_metric_specification {
+      predefined_metric_type = "ECSServiceAverageCPUUtilization"
+    }
   }
 }
