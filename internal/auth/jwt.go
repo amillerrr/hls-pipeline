@@ -17,7 +17,7 @@ func init() {
 	secret := os.Getenv("JWT_SECRET")
 	if secret == "" {
 		env := os.Getenv("ENV")
-		if env == "prod" || env == "production"  {
+		if env == "prod" || env == "production" {
 			panic("FATAL: JWT_SECRET environment variable is not set")
 		}
 		fmt.Println("WARNING: Using default JWT secret - DO NOT USE IN PRODUCTION")
@@ -47,10 +47,10 @@ func GenerateToken(username string) (string, error) {
 		Username: username,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(expirationTime),
-			IssuedAt: jwt.NewNumericDate(time.Now()),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			NotBefore: jwt.NewNumericDate(time.Now()),
 			Issuer:    "eye-of-storm",
-			Subject: username,
+			Subject:   username,
 		},
 	}
 
@@ -61,7 +61,7 @@ func GenerateToken(username string) (string, error) {
 // Validate JWT token and return
 func ValidateToken(tokenString string) (*Claims, error) {
 	claims := &Claims{}
-	
+
 	token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (any, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])

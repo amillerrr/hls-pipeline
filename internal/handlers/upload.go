@@ -28,18 +28,18 @@ var tracer = otel.Tracer("eye-api")
 const maxUploadSize = 500 << 20 // 500 MB
 
 type API struct {
-	s3Client  *s3.Client
-	sqsClient *sqs.Client
-	sqsQueueURL  string
-	log    *slog.Logger
+	s3Client    *s3.Client
+	sqsClient   *sqs.Client
+	sqsQueueURL string
+	log         *slog.Logger
 }
 
 func New(s3 *s3.Client, sqsClient *sqs.Client, sqsQueueURL string, log *slog.Logger) *API {
 	return &API{
-		s3Client:  s3,
-		sqsClient: sqsClient,
-		sqsQueueURL:  sqsQueueURL,
-		log:    log,
+		s3Client:    s3,
+		sqsClient:   sqsClient,
+		sqsQueueURL: sqsQueueURL,
+		log:         log,
 	}
 }
 
@@ -98,7 +98,7 @@ func (a *API) LoginHandler(w http.ResponseWriter, r *http.Request) {
 func (a *API) UploadHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-		// Handle CORS preflight
+	// Handle CORS preflight
 	if r.Method == http.MethodOptions {
 		a.handleCORSPreflight(w, r)
 		return
@@ -148,14 +148,14 @@ func (a *API) UploadHandler(w http.ResponseWriter, r *http.Request) {
 	// Validate content type
 	contentType := header.Header.Get("Content-Type")
 	allowedTypes := map[string]bool{
-		"video/mp4":       true,
-		"video/quicktime": true,
-		"video/x-msvideo": true,
+		"video/mp4":        true,
+		"video/quicktime":  true,
+		"video/x-msvideo":  true,
 		"video/x-matroska": true,
-		"video/webm":      true,
+		"video/webm":       true,
 	}
 	if contentType != "" && !allowedTypes[contentType] {
-		// Read first 512 bytes 
+		// Read first 512 bytes
 		buf := make([]byte, 512)
 		n, _ := file.Read(buf)
 		detectedType := http.DetectContentType(buf[:n])
@@ -198,7 +198,7 @@ func (a *API) UploadHandler(w http.ResponseWriter, r *http.Request) {
 		"videoId", videoID,
 	)
 
-	// Queue processing job 
+	// Queue processing job
 	message := map[string]string{
 		"videoId":  videoID,
 		"s3Key":    s3Key,

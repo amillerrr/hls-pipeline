@@ -30,8 +30,8 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 
-	"github.com/amillerrr/hls-pipeline/internal/observability"
 	"github.com/amillerrr/hls-pipeline/internal/logger"
+	"github.com/amillerrr/hls-pipeline/internal/observability"
 )
 
 var tracer = otel.Tracer("eye-worker")
@@ -91,7 +91,7 @@ func main() {
 
 	if err := godotenv.Load(); err != nil {
 		logger.Info(context.Background(), log, "No .env file found, relying on system ENV variables")
-	} 
+	}
 
 	// Initialize tracing
 	shutdownTracer := observability.InitTracer(context.Background(), "eye-worker")

@@ -15,12 +15,12 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
-	
-	"github.com/amillerrr/hls-pipeline/internal/observability"
+
+	"github.com/amillerrr/hls-pipeline/internal/auth"
 	"github.com/amillerrr/hls-pipeline/internal/handlers"
-	"github.com/amillerrr/hls-pipeline/internal/storage" 
-	"github.com/amillerrr/hls-pipeline/internal/logger" 
-	"github.com/amillerrr/hls-pipeline/internal/auth" 
+	"github.com/amillerrr/hls-pipeline/internal/logger"
+	"github.com/amillerrr/hls-pipeline/internal/observability"
+	"github.com/amillerrr/hls-pipeline/internal/storage"
 )
 
 func main() {
@@ -29,7 +29,7 @@ func main() {
 
 	if err := godotenv.Load(); err != nil {
 		logger.Info(context.Background(), log, "No .env file found, relying on system ENV variables")
-	} 
+	}
 
 	shutdownTracer := observability.InitTracer(context.Background(), "eye-api")
 	defer func() {
@@ -71,7 +71,7 @@ func main() {
 
 	// Protected endpoints
 	mux.HandleFunc("/upload", auth.AuthMiddleware(api.UploadHandler))
-	
+
 	// Metrics endpoint
 	mux.Handle("/metrics", localOnlyMiddleware(promhttp.Handler()))
 
@@ -81,16 +81,16 @@ func main() {
 	}
 
 	srv := &http.Server{
-		Addr:         ":" + port,
-		Handler:      mux,
-		ReadTimeout:  30 * time.Second,
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadTimeout:       30 * time.Second,
 		ReadHeaderTimeout: 10 * time.Second,
-		WriteTimeout: 300 * time.Second,
-		IdleTimeout: 120 * time.Second,
-		MaxHeaderBytes: 1 << 20,
+		WriteTimeout:      300 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 
-	// Graceful Shutdown 
+	// Graceful Shutdown
 	go func() {
 		logger.Info(context.Background(), log, "Starting API Server", "port", port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -148,7 +148,7 @@ func localOnlyMiddleware(next http.Handler) http.Handler {
 
 // Check if request is from localhost
 func isLocalRequest(remoteAddr string) bool {
-		localPrefixes := []string{
+	localPrefixes := []string{
 		"127.0.0.1:",
 		"localhost:",
 		"[::1]:",
