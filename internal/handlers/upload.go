@@ -25,8 +25,6 @@ import (
 
 var tracer = otel.Tracer("eye-api")
 
-const maxUploadSize = 500 << 20 // 500 MB
-
 type API struct {
 	s3Client    *storage.Client
 	sqsClient   *sqs.Client
@@ -87,9 +85,9 @@ func (a *API) LoginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
-		"token": token,
-	})
+	if err := json.NewEncoder(w).Encode(map[string]string{"token": token}); err != nil {
+		logger.Error(ctx, a.log, "Failed to encode response", "error", err)
+	}
 }
 
 // Request payload for Init
@@ -150,11 +148,13 @@ func (a *API) InitUploadHandler(w http.ResponseWriter, r *http.Request) {
 	logger.Info(ctx, a.log, "Generated presigned URL", "videoId", videoID, "key", s3Key)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(InitUploadResponse{
+	if err := json.NewEncoder(w).Encode(InitUploadResponse{
 		UploadURL: url,
 		VideoID:   videoID,
 		Key:       s3Key,
-	})
+	}); err != nil {
+    logger.Error(ctx, a.log, "Failed to encode response", "error", err)
+	}
 }
 
 type CompleteUploadRequest struct {
@@ -218,11 +218,13 @@ func (a *API) CompleteUploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(map[string]string{
+	if err := json.NewEncoder(w).Encode(map[string]string{
 		"videoId": req.VideoID,
 		"status":  "processing",
 		"message": "Video queued for processing",
-	})
+	}); err != nil {
+		logger.Error(ctx, a.log, "Failed to encode response", "error", err)
+	}
 }
 
 // Return the most recently processed video
@@ -290,11 +292,13 @@ func (a *API) GetLatestVideoHandler(w http.ResponseWriter, r *http.Request) {
 	playbackURL := fmt.Sprintf("https://%s/%s", cdnDomain, latestKey)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	if err := json.NewEncoder(w).Encode(map[string]any{
 		"videoId":     videoID,
 		"playbackUrl": playbackURL,
 		"processedAt": latestTime.Format(time.RFC3339),
-	})
+	}); err != nil {
+		logger.Error(ctx, a.log, "Failed to encode response", "error", err)
+	}
 }
 
 // handle requests for CORS

@@ -13,6 +13,10 @@ import (
 
 var jwtKey []byte
 
+type contextKey string
+
+var claimsKey contextKey = "claims"
+
 func init() {
 	secret := os.Getenv("JWT_SECRET")
 	if secret == "" {
@@ -107,7 +111,7 @@ func AuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		ctx := context.WithValue(r.Context(), "claims", claims)
+		ctx := context.WithValue(r.Context(), claimsKey, claims)
 		r = r.WithContext(ctx)
 
 		next.ServeHTTP(w, r)

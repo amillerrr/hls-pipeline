@@ -123,7 +123,9 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 		"status":  "healthy",
 		"service": "eye-api",
 	}
-	json.NewEncoder(w).Encode(response)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		logger.Error(context.Background(), slog.Default(), "Failed to encode health check response", "error", err)
+	}
 }
 
 // Restrict access to localhost

@@ -136,7 +136,9 @@ func main() {
 		http.Handle("/metrics", promhttp.Handler())
 		http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("ok"))
+			if _, err := w.Write([]byte("ok")); err != nil {
+				logger.Error(r.Context(), log, "Failed to write health response", "error", err)
+			}
 		})
 		logger.Info(context.Background(), log, "Starting metrics server", "port", "2112")
 		if err := http.ListenAndServe(":2112", nil); err != nil {
@@ -390,7 +392,9 @@ func (w *Worker) runFFmpeg(ctx context.Context, inputPath, hlsDir string) error 
 	// Drain stdout
 	go func() {
 		defer wg.Done()
-		io.Copy(io.Discard, stdoutPipe)
+		if _, err := io.Copy(io.Discard, stdoutPipe); err != nil {
+			logger.Warn(ctx, w.log, "Failed to drain stdout", "error", err)
+		}
 	}()
 
 	// Wait for command to complete
@@ -479,7 +483,6 @@ func (w *Worker) calculateQualityMetrics(ctx context.Context, inputPath, hlsDir 
 	if idx := strings.Index(outputStr, "All:"); idx != -1 {
 		ssimStr := strings.TrimSpace(outputStr[idx+4 : idx+10])
 		if ssim, err := strconv.ParseFloat(ssimStr, 64); err == nil {
-			// FIXED: Correct label - this is 720p upscaled from source vs source at 720p
 			qualityScore.WithLabelValues("720p_vs_source").Set(ssim)
 			logger.Info(ctx, w.log, "SSIM score", "value", ssim)
 		}
