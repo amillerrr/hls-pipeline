@@ -346,22 +346,22 @@ func (w *Worker) runFFmpeg(ctx context.Context, inputPath, hlsDir string) error 
 		"-c:v:0", "libx264", "-b:v:0", "5M", "-maxrate:v:0", "5.5M", "-bufsize:v:0", "10M",
 		"-c:a:0", "aac", "-b:a:0", "192k",
 		"-hls_time", "6", "-hls_list_size", "0",
-		"-hls_segment_filename", filepath.Join(hlsDir, "1080p_%03d.ts"),
-		filepath.Join(hlsDir, "1080p.m3u8"),
+		"-hls_segment_filename", filepath.Join(hlsDir, "1080p", "1080p_%03d.ts"),
+		filepath.Join(hlsDir, "1080p", "1080p.m3u8"),
 		// 720p
 		"-map", "[v2out]", "-map", "0:a?",
 		"-c:v:1", "libx264", "-b:v:1", "2.5M", "-maxrate:v:1", "2.75M", "-bufsize:v:1", "5M",
 		"-c:a:1", "aac", "-b:a:1", "128k",
 		"-hls_time", "6", "-hls_list_size", "0",
-		"-hls_segment_filename", filepath.Join(hlsDir, "720p_%03d.ts"),
-		filepath.Join(hlsDir, "720p.m3u8"),
+		"-hls_segment_filename", filepath.Join(hlsDir, "720p", "720p_%03d.ts"),
+		filepath.Join(hlsDir, "720p", "720p.m3u8"),
 		// 480p
 		"-map", "[v3out]", "-map", "0:a?",
 		"-c:v:2", "libx264", "-b:v:2", "1M", "-maxrate:v:2", "1.1M", "-bufsize:v:2", "2M",
 		"-c:a:2", "aac", "-b:a:2", "96k",
 		"-hls_time", "6", "-hls_list_size", "0",
-		"-hls_segment_filename", filepath.Join(hlsDir, "480p_%03d.ts"),
-		filepath.Join(hlsDir, "480p.m3u8"),
+		"-hls_segment_filename", filepath.Join(hlsDir, "480p", "480p_%03d.ts"),
+		filepath.Join(hlsDir, "480p", "480p.m3u8"),
 	}
 
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
@@ -430,11 +430,11 @@ func (w *Worker) generateMasterPlaylist(hlsDir string) error {
 	masterContent := `#EXTM3U
 #EXT-X-VERSION:3
 #EXT-X-STREAM-INF:BANDWIDTH=5500000,RESOLUTION=1920x1080
-1080p.m3u8
+1080p/1080p.m3u8
 #EXT-X-STREAM-INF:BANDWIDTH=2750000,RESOLUTION=1280x720
-720p.m3u8
+720p/720p.m3u8
 #EXT-X-STREAM-INF:BANDWIDTH=1100000,RESOLUTION=854x480
-480p.m3u8
+480p/480p.m3u8
 `
 	return os.WriteFile(filepath.Join(hlsDir, "master.m3u8"), []byte(masterContent), 0644)
 }
@@ -459,7 +459,7 @@ func (w *Worker) calculateQualityMetrics(ctx context.Context, inputPath, hlsDir 
 	}
 
 	// Extract frame from 720p output at 1s
-	playlist720 := filepath.Join(hlsDir, "720p.m3u8")
+	playlist720 := filepath.Join(hlsDir, "720p", "720p.m3u8")
 	err = exec.CommandContext(ctx, "ffmpeg", "-y", "-ss", "00:00:01", "-i", playlist720,
 		"-vframes", "1", distFrame).Run()
 	if err != nil {

@@ -6,11 +6,12 @@ if [ -f .env ]; then
     set +a
 fi
 
+# Fallback values
 DEFAULT_URL="https://api.toptal.miller.today"
 BASE_URL="${1:-${API_ENDPOINT:-$DEFAULT_URL}}"
 VIDEO_FILE="./test_assets/tempest_input.mp4"
 USERNAME="admin"
-PASSWORD="secret"
+PASSWORD="changeme-use-secrets-manager"
 
 echo "Targeting: $BASE_URL"
 
@@ -21,8 +22,8 @@ fi
 
 # Login
 echo "Authenticating..."
-LOGIN_RESPONSE=$(curl -s -k -X POST -d "username=$USERNAME&password=$PASSWORD" "$BASE_URL/login")
-TOKEN=$(echo "$LOGIN_RESPONSE" | grep -o '"token": *"[^"]*"' | cut -d'"' -f4)
+LOGIN_RESPONSE=$(curl -s -k -X POST -u "$USERNAME:$PASSWORD" "$BASE_URL/login")
+TOKEN=$(echo "$LOGIN_RESPONSE" | jq -r '.token')
 
 if [ -z "$TOKEN" ] || [ "$TOKEN" == "null" ]; then
     echo "Authentication failed."
