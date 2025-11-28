@@ -339,6 +339,7 @@ func (w *Worker) runFFmpeg(ctx context.Context, inputPath, hlsDir string) error 
 	// Multi-bitrate HLS encoding
 	args := []string{
 		"-i", inputPath,
+		"-preset", "veryfast", "-g", "100", "-keyint_min", "100", "-sc_threshold", "0",
 		"-filter_complex",
 		"[0:v]split=3[v1][v2][v3];" +
 			"[v1]scale=1920:1080[v1out];" +
@@ -346,7 +347,7 @@ func (w *Worker) runFFmpeg(ctx context.Context, inputPath, hlsDir string) error 
 			"[v3]scale=854:480[v3out]",
 		// 1080p
 		"-map", "[v1out]", "-map", "0:a?",
-		"-c:v:0", "libx264", "-b:v:0", "5M", "-maxrate:v:0", "5.5M", "-bufsize:v:0", "10M",
+		"-c:v:0", "libx264", "-b:v:0", "5M", "-maxrate:v:0", "5.5M", "-bufsize:v:0", "7.5M",
 		"-c:a:0", "aac", "-b:a:0", "192k",
 		"-hls_time", "6", "-hls_list_size", "0",
 		"-hls_segment_filename", filepath.Join(hlsDir, "1080p", "seg_%03d.ts"),
