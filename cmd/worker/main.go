@@ -307,8 +307,11 @@ func (w *Worker) transcodeToHLS(ctx context.Context, videoID string, inputPath s
 
 	// Create output directory
 	hlsDir := filepath.Join("/tmp/hls", videoID)
-	if err := os.MkdirAll(hlsDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create HLS dir: %w", err)
+	for _, subdir := range []string{"1080p", "720p", "480p"} {
+		dirPath := filepath.Join(hlsDir, subdir)
+		if err := os.MkdirAll(dirPath, 0755); err != nil {
+			return "", fmt.Errorf("failed to create HLS subdir %s: %w", subdir, err)
+		}
 	}
 
 	// Run FFmpeg transcoding

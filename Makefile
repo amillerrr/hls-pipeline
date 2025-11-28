@@ -114,7 +114,7 @@ ecs-deploy:
 	@echo "Forcing ECS service update..."
 	@aws ecs update-service --cluster eye-cluster --service eye-api-svc --force-new-deployment --region $(AWS_REGION) > /dev/null
 	@aws ecs update-service --cluster eye-cluster --service eye-worker-svc --force-new-deployment --region $(AWS_REGION) > /dev/null
-	@echo "ECS services updating. Monitor at:"
+	@echo "ECS services updating."
 
 # Development Targets
 # Run Go linters
