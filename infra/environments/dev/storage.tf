@@ -134,11 +134,6 @@ resource "aws_s3_bucket_cors_configuration" "processed_cors" {
   }
 }
 
-# CloudFront Origin Access Identity
-resource "aws_cloudfront_origin_access_identity" "processed" {
-  comment = "OAI for eye-processed bucket"
-}
-
 # Bucket policy for CloudFront access
 resource "aws_s3_bucket_policy" "processed_cloudfront" {
   bucket = aws_s3_bucket.processed.id
@@ -146,13 +141,18 @@ resource "aws_s3_bucket_policy" "processed_cloudfront" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Sid    = "AllowCloudFrontAccess"
+      Sid    = "AllowCloudFrontAccessServicePrincipal"
       Effect = "Allow"
       Principal = {
-        AWS = aws_cloudfront_origin_access_identity.processed.iam_arn
+        Service = "cloudfront.amazonaws.com"
       }
       Action   = "s3:GetObject"
       Resource = "${aws_s3_bucket.processed.arn}/*"
+      Condition = {
+        StringEquals = {
+          "AWS:SourceArn" = aws_cloudfront_distribution.s3_distribution.arn
+        }
+      }
     }]
   })
 }
@@ -178,7 +178,3 @@ output "processed_bucket_arn" {
   value       = aws_s3_bucket.processed.arn
 }
 
-output "cloudfront_oai_iam_arn" {
-  description = "IAM ARN of CloudFront OAI"
-  value       = aws_cloudfront_origin_access_identity.processed.iam_arn
-}

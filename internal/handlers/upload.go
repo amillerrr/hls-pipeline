@@ -41,9 +41,27 @@ func New(s3 *storage.Client, sqsClient *sqs.Client, sqsQueueURL string, log *slo
 	}
 }
 
+// Add CORS headers to the response
+func (a *API) setCORSHeaders(w http.ResponseWriter, r *http.Request) {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		origin = "*"
+	}
+	w.Header().Set("Access-Control-Allow-Origin", origin)
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+	w.Header().Set("Access-Control-Max-Age", "86400")
+}
+
 // Handle user authentication and return JWT token
 func (a *API) LoginHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	a.setCORSHeaders(w, r)
+
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -106,6 +124,12 @@ type InitUploadResponse struct {
 // Generate Presigned URL
 func (a *API) InitUploadHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	a.setCORSHeaders(w, r)
+
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -166,6 +190,12 @@ type CompleteUploadRequest struct {
 // Queue the Job
 func (a *API) CompleteUploadHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	a.setCORSHeaders(w, r)
+
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -230,10 +260,11 @@ func (a *API) CompleteUploadHandler(w http.ResponseWriter, r *http.Request) {
 // Return the most recently processed video
 func (a *API) GetLatestVideoHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	a.setCORSHeaders(w, r)	
 
 	// Handle CORS preflight
 	if r.Method == http.MethodOptions {
-		a.handleCORSPreflight(w, r)
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
@@ -299,18 +330,4 @@ func (a *API) GetLatestVideoHandler(w http.ResponseWriter, r *http.Request) {
 	}); err != nil {
 		logger.Error(ctx, a.log, "Failed to encode response", "error", err)
 	}
-}
-
-// handle requests for CORS
-func (a *API) handleCORSPreflight(w http.ResponseWriter, r *http.Request) {
-	origin := r.Header.Get("Origin")
-	if origin == "" {
-		origin = "*"
-	}
-
-	w.Header().Set("Access-Control-Allow-Origin", origin)
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-	w.Header().Set("Access-Control-Max-Age", "86400") // 24 hours
-	w.WriteHeader(http.StatusNoContent)
 }
