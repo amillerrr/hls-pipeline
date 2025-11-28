@@ -8,6 +8,7 @@
     #video-container { width: 80%; margin: 20px auto; border: 1px solid #444; }
     video { width: 100%; }
     #metrics { padding: 20px; font-size: 12px; color: #0f0; }
+    #errors { color: #f55; padding: 20px; font-size: 12px; border-top: 1px solid #444; }
   </style>
 </head>
 <body>
@@ -25,6 +26,14 @@
     var video = document.getElementById('video');
     var apiEndpoint = 'https://api.toptal.miller.today/latest'
 
+    function logError(msg) {
+        var d = document.createElement('div');
+        d.innerText = "[ERROR] " + msg;
+        var container = document.getElementById('errors');
+        if (container) container.appendChild(d);
+        console.error(msg);
+    }
+
     fetch(apiEndpoint) 
       .then(response => response.json())
       .then(data => {
@@ -34,14 +43,18 @@
           
           if (Hls.isSupported()) {
             var hls = new Hls({
-              debug: false,
-              capLevelToPlayerSize: true 
+              debug: true,
+              capLevelToPlayerSize: false,
+              maxBufferLength: 30,
             });
 
             hls.loadSource(videoSrc);
             hls.attachMedia(video);
 
             hls.on(Hls.Events.MANIFEST_PARSED, function() {
+              var maxIndex = hls.levels.length - 1; 
+              console.log("Found " + hls.levels.length + " levels. Max Index: " + maxIndex);
+              hls.currentLevel = maxIndex;
               video.play();
             });
             hls.on(Hls.Events.LEVEL_SWITCHED, function(event, data) {
@@ -49,6 +62,14 @@
               document.getElementById('stat_level').innerText = "Current Level Index: " + data.level;
               document.getElementById('stat_bitrate').innerText = "Bitrate: " + (level.bitrate / 1000).toFixed(0) + " kbps";
               document.getElementById('stat_res').innerText = "Resolution: " + level.width + "x" + level.height;
+            });
+            hls.on(Hls.Events.ERROR, function (event, data) {
+                if (data.fatal) {
+                    logError("Fatal error: " + data.type);
+                }
+                if (data.response && data.response.code >= 400) {
+                    logError("Network Error: " + data.response.url + " (" + data.response.code + ")");
+                }
             });
           }
         } else {
@@ -58,7 +79,6 @@
       })
       .catch(err => {
         console.error("API Error:", err);
-        document.body.innerHTML += "<h3>Error connecting to API. Check console output.</h3>";
       });
   </script>
 </body>

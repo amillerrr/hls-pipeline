@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Eye of the Storm - ABR Demonstration</title>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { 
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      color: #fff; 
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .container { max-width: 1200px; margin: 0 auto; }
+    
+    header {
+      text-align: center;
+      margin-bottom: 24px;
+    }
+    h1 { 
+      font-size: 28px; 
+      font-weight: 600;
+      background: linear-gradient(90deg, #00d9ff, #00ff88);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 8px;
+    }
+    .subtitle { color: #8892b0; font-size: 14px; }
+    
+    .main-grid {
+      display: grid;
+      grid-template-columns: 1fr 380px;
+      gap: 20px;
+    }
+    
+    @media (max-width: 900px) {
+      .main-grid { grid-template-columns: 1fr; }
+    }
+    
+    /* Video Section */
+    .video-section {
+      background: #0d1117;
+      border-radius: 12px;
+      overflow: hidden;
+      border: 1px solid #30363d;
+    }
+    .video-header {
+      padding: 12px 16px;
+      background: #161b22;
+      border-bottom: 1px solid #30363d;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .video-title { font-size: 14px; font-weight: 600; }
+    .live-badge {
+      background: #238636;
+      color: white;
+      padding: 4px 10px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 600;
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.7; }
+    }
+    video { 
+      width: 100%; 
+      display: block;
+      background: #000;
+    }
+    
+    /* Current Stats Bar */
+    .stats-bar {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1px;
+      background: #30363d;
+    }
+    .stat-item {
+      background: #161b22;
+      padding: 12px;
+      text-align: center;
+    }
+    .stat-label { 
+      font-size: 10px; 
+      color: #8b949e; 
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 4px;
+    }
+    .stat-value { 
+      font-size: 18px; 
+      font-weight: 700;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+    }
+    .stat-value.quality { color: #58a6ff; }
+    .stat-value.bitrate { color: #3fb950; }
+    .stat-value.buffer { color: #d29922; }
+    .stat-value.bandwidth { color: #f778ba; }
+    
+    /* Right Panel */
+    .panel {
+      background: #0d1117;
+      border-radius: 12px;
+      border: 1px solid #30363d;
+      display: flex;
+      flex-direction: column;
+      max-height: 600px;
+    }
+    .panel-header {
+      padding: 12px 16px;
+      background: #161b22;
+      border-bottom: 1px solid #30363d;
+      font-size: 14px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .panel-header .icon { font-size: 16px; }
+    
+    /* Quality Levels */
+    .quality-levels {
+      padding: 12px;
+      border-bottom: 1px solid #30363d;
+    }
+    .quality-item {
+      display: flex;
+      align-items: center;
+      padding: 8px 12px;
+      border-radius: 6px;
+      margin-bottom: 6px;
+      background: #161b22;
+      transition: all 0.3s ease;
+    }
+    .quality-item.active {
+      background: #1f6feb;
+      box-shadow: 0 0 20px rgba(31, 111, 235, 0.4);
+    }
+    .quality-item .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #484f58;
+      margin-right: 12px;
+      transition: all 0.3s ease;
+    }
+    .quality-item.active .dot {
+      background: #fff;
+      box-shadow: 0 0 8px #fff;
+    }
+    .quality-info { flex: 1; }
+    .quality-name { font-size: 13px; font-weight: 600; }
+    .quality-detail { font-size: 11px; color: #8b949e; }
+    .quality-item.active .quality-detail { color: rgba(255,255,255,0.8); }
+    
+    /* Event Log */
+    .event-log {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 11px;
+    }
+    .log-entry {
+      padding: 6px 10px;
+      border-radius: 4px;
+      margin-bottom: 4px;
+      display: flex;
+      gap: 10px;
+      animation: slideIn 0.3s ease;
+    }
+    @keyframes slideIn {
+      from { opacity: 0; transform: translateX(-10px); }
+      to { opacity: 1; transform: translateX(0); }
+    }
+    .log-entry.switch {
+      background: linear-gradient(90deg, rgba(31, 111, 235, 0.2), transparent);
+      border-left: 3px solid #1f6feb;
+    }
+    .log-entry.buffer {
+      background: linear-gradient(90deg, rgba(210, 153, 34, 0.2), transparent);
+      border-left: 3px solid #d29922;
+    }
+    .log-entry.load {
+      background: linear-gradient(90deg, rgba(63, 185, 80, 0.2), transparent);
+      border-left: 3px solid #3fb950;
+    }
+    .log-entry.error {
+      background: linear-gradient(90deg, rgba(248, 81, 73, 0.2), transparent);
+      border-left: 3px solid #f85149;
+    }
+    .log-time { color: #8b949e; min-width: 65px; }
+    .log-msg { color: #c9d1d9; }
+    
+    /* Instructions */
+    .instructions {
+      margin-top: 20px;
+      background: #161b22;
+      border-radius: 12px;
+      padding: 20px;
+      border: 1px solid #30363d;
+    }
+    .instructions h3 {
+      font-size: 14px;
+      margin-bottom: 12px;
+      color: #58a6ff;
+    }
+    .instructions ol {
+      padding-left: 20px;
+      color: #8b949e;
+      font-size: 13px;
+      line-height: 1.8;
+    }
+    .instructions code {
+      background: #0d1117;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: 'SF Mono', monospace;
+      color: #79c0ff;
+    }
+
+    /* Loading State */
+    .loading {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 60px;
+      color: #8b949e;
+    }
+    .spinner {
+      width: 40px;
+      height: 40px;
+      border: 3px solid #30363d;
+      border-top-color: #58a6ff;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin-bottom: 16px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Eye of the Storm</h1>
+      <p class="subtitle">Adaptive Bitrate Streaming Demonstration — HLS Multi-Quality Playback</p>
+    </header>
+    
+    <div class="main-grid">
+      <div class="video-section">
+        <div class="video-header">
+          <span class="video-title">HLS Adaptive Stream</span>
+          <span class="live-badge" id="status-badge">LOADING</span>
+        </div>
+        <video id="video" controls playsinline></video>
+        <div class="stats-bar">
+          <div class="stat-item">
+            <div class="stat-label">Current Quality</div>
+            <div class="stat-value quality" id="current-quality">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Bitrate</div>
+            <div class="stat-value bitrate" id="current-bitrate">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Buffer</div>
+            <div class="stat-value buffer" id="current-buffer">—</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-label">Bandwidth</div>
+            <div class="stat-value bandwidth" id="current-bandwidth">—</div>
+          </div>
+        </div>
+      </div>
+      
+      <div class="panel">
+        <div class="panel-header">
+          <span class="icon">📊</span> Quality Levels & Event Log
+        </div>
+        <div class="quality-levels" id="quality-levels">
+          <div class="loading">
+            <div class="spinner"></div>
+            <span>Loading stream...</span>
+          </div>
+        </div>
+        <div class="event-log" id="event-log"></div>
+      </div>
+    </div>
+    
+    <div class="instructions">
+      <h3>How to Demonstrate ABR Switching</h3>
+      <ol>
+        <li>Open <code>DevTools → Network</code> tab and observe segment downloads (.ts files)</li>
+        <li>Click the <code>⋮</code> menu in DevTools → Select <code>Network throttling → Slow 4G</code></li>
+        <li>Refresh and the Quality panel will switch from <code>1080p → 480p</code> as buffer depletes</li>
+        <li>Disable throttling and quality will climb back to <code>1080p</code></li>
+        <li>The Event Log shows every quality switch with timestamp</li>
+      </ol>
+    </div>
+  </div>
+
+  <script>
+    const video = document.getElementById('video');
+    const eventLog = document.getElementById('event-log');
+    const qualityLevels = document.getElementById('quality-levels');
+    const statusBadge = document.getElementById('status-badge');
+    
+    const API_ENDPOINT = 'https://api.toptal.miller.today/latest';
+    let hls = null;
+    let startTime = Date.now();
+    
+    function getTimestamp() {
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+      return elapsed.padStart(6, ' ') + 's';
+    }
+    
+    function addLogEntry(message, type = 'info') {
+      const entry = document.createElement('div');
+      entry.className = `log-entry ${type}`;
+      entry.innerHTML = `
+        <span class="log-time">${getTimestamp()}</span>
+        <span class="log-msg">${message}</span>
+      `;
+      eventLog.insertBefore(entry, eventLog.firstChild);
+      
+      // Keep only last 50 entries
+      while (eventLog.children.length > 50) {
+        eventLog.removeChild(eventLog.lastChild);
+      }
+    }
+    
+    function updateStats(levelIndex) {
+      if (!hls || levelIndex < 0) return;
+      
+      const level = hls.levels[levelIndex];
+      if (!level) return;
+      
+      document.getElementById('current-quality').textContent = `${level.height}p`;
+      document.getElementById('current-bitrate').textContent = `${(level.bitrate / 1000000).toFixed(1)} Mbps`;
+      
+      // Update quality level indicators
+      document.querySelectorAll('.quality-item').forEach((item, idx) => {
+        item.classList.toggle('active', idx === levelIndex);
+      });
+    }
+    
+    function updateBuffer() {
+      if (!video.buffered.length) return;
+      const buffered = video.buffered.end(video.buffered.length - 1) - video.currentTime;
+      document.getElementById('current-buffer').textContent = `${buffered.toFixed(1)}s`;
+    }
+    
+    function updateBandwidth() {
+      if (hls && hls.bandwidthEstimate) {
+        const mbps = (hls.bandwidthEstimate / 1000000).toFixed(1);
+        document.getElementById('current-bandwidth').textContent = `${mbps} Mbps`;
+      }
+    }
+    
+    function renderQualityLevels(levels) {
+      const labels = { 1080: '1080p Full HD', 720: '720p HD', 480: '480p SD' };
+      qualityLevels.innerHTML = levels.map((level, idx) => `
+        <div class="quality-item" data-index="${idx}">
+          <div class="dot"></div>
+          <div class="quality-info">
+            <div class="quality-name">${labels[level.height] || level.height + 'p'}</div>
+            <div class="quality-detail">${level.width}×${level.height} @ ${(level.bitrate/1000).toFixed(0)} kbps</div>
+          </div>
+        </div>
+      `).join('');
+    }
+    
+    // Fetch latest video and initialize player
+    fetch(API_ENDPOINT)
+      .then(res => res.json())
+      .then(data => {
+        if (!data.playbackUrl) throw new Error('No video available');
+        
+        addLogEntry(`Loaded video: ${data.videoId.substring(0, 8)}...`, 'load');
+        
+        if (Hls.isSupported()) {
+          hls = new Hls({
+            debug: false,
+            enableWorker: true,
+            capLevelToPlayerSize: true,
+            startLevel: -1 // Auto-select
+          });
+          
+          hls.loadSource(data.playbackUrl);
+          hls.attachMedia(video);
+          
+          hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
+            statusBadge.textContent = 'LIVE';
+            statusBadge.style.background = '#238636';
+            renderQualityLevels(hls.levels);
+            addLogEntry(`Manifest loaded: ${data.levels.length} quality levels`, 'load');
+            video.play().catch(() => {});
+          });
+          
+          hls.on(Hls.Events.LEVEL_SWITCHED, (event, data) => {
+            const level = hls.levels[data.level];
+            const prevLevel = hls.levels[hls.currentLevel];
+            updateStats(data.level);
+            addLogEntry(`⚡ Quality switched to <strong>${level.height}p</strong> (${(level.bitrate/1000).toFixed(0)} kbps)`, 'switch');
+          });
+          
+          hls.on(Hls.Events.LEVEL_LOADING, (event, data) => {
+            const level = hls.levels[data.level];
+            if (level) {
+              addLogEntry(`Loading ${level.height}p playlist...`, 'buffer');
+            }
+          });
+          
+          hls.on(Hls.Events.FRAG_LOADED, (event, data) => {
+            const level = hls.levels[data.frag.level];
+            if (level) {
+              addLogEntry(`Segment ${data.frag.sn} loaded (${level.height}p)`, 'load');
+            }
+            updateBandwidth();
+          });
+          
+          hls.on(Hls.Events.ERROR, (event, data) => {
+            addLogEntry(`Error: ${data.details}`, 'error');
+            if (data.fatal) {
+              statusBadge.textContent = 'ERROR';
+              statusBadge.style.background = '#da3633';
+            }
+          });
+          
+          // Update buffer periodically
+          setInterval(updateBuffer, 500);
+          
+        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+          // Safari native HLS
+          video.src = data.playbackUrl;
+          statusBadge.textContent = 'NATIVE';
+          addLogEntry('Using Safari native HLS (limited metrics)', 'load');
+        }
+      })
+      .catch(err => {
+        statusBadge.textContent = 'ERROR';
+        statusBadge.style.background = '#da3633';
+        addLogEntry(`Failed to load: ${err.message}`, 'error');
+        qualityLevels.innerHTML = `<div class="loading" style="color: #f85149;">Failed to load video. Check API endpoint.</div>`;
+      });
+  </script>
+</body>
+</html>
