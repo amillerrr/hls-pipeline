@@ -1,6 +1,6 @@
 # ECS Execution Role 
 resource "aws_iam_role" "ecs_execution_role" {
-  name = "eye-ecs-execution-role"
+  name = "hls-ecs-execution-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -14,7 +14,7 @@ resource "aws_iam_role" "ecs_execution_role" {
   })
 
   tags = {
-    Name = "eye-ecs-execution-role"
+    Name = "hls-ecs-execution-role"
   }
 }
 
@@ -25,7 +25,7 @@ resource "aws_iam_role_policy_attachment" "ecs_execution_role_policy" {
 
 # API Task Role
 resource "aws_iam_role" "api_task_role" {
-  name = "eye-api-task-role"
+  name = "hls-api-task-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -39,7 +39,7 @@ resource "aws_iam_role" "api_task_role" {
   })
 
   tags = {
-    Name = "eye-api-task-role"
+    Name = "hls-api-task-role"
   }
 }
 
@@ -150,7 +150,7 @@ resource "aws_iam_role_policy" "api_observability" {
         Resource = "*"
         Condition = {
           StringEquals = {
-            "cloudwatch:namespace" = "EyeOfTheStorm"
+            "cloudwatch:namespace" = "HLSPipeline"
           }
         }
       }
@@ -160,7 +160,7 @@ resource "aws_iam_role_policy" "api_observability" {
 
 # Worker Task Role
 resource "aws_iam_role" "worker_task_role" {
-  name = "eye-worker-task-role"
+  name = "hls-worker-task-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -174,7 +174,7 @@ resource "aws_iam_role" "worker_task_role" {
   })
 
   tags = {
-    Name = "eye-worker-task-role"
+    Name = "hls-worker-task-role"
   }
 }
 
@@ -287,7 +287,7 @@ resource "aws_iam_role_policy" "worker_observability" {
         Resource = "*"
         Condition = {
           StringEquals = {
-            "cloudwatch:namespace" = "EyeOfTheStorm"
+            "cloudwatch:namespace" = "HLSPipeline"
           }
         }
       }
@@ -310,7 +310,7 @@ resource "aws_iam_openid_connect_provider" "github_actions" {
 
 # Role for GitHub Actions
 resource "aws_iam_role" "github_actions" {
-  name = "eye-github-actions-role"
+  name = "hls-github-actions-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -332,7 +332,7 @@ resource "aws_iam_role" "github_actions" {
   })
 
   tags = {
-    Name = "eye-github-actions-role"
+    Name = "hls-github-actions-role"
   }
 }
 

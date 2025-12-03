@@ -1,5 +1,5 @@
 resource "aws_dynamodb_table" "terraform_lock" {
-  name         = "eye-tf-lock-table"
+  name         = "hls-tf-lock-table"
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "LockID"
 
@@ -14,7 +14,7 @@ resource "aws_dynamodb_table" "terraform_lock" {
 }
 
 resource "aws_s3_bucket" "terraform_state" {
-  bucket = "eye-tf-state-store"
+  bucket = "hls-tf-state-store"
   
   tags = {
     Name = "Terraform State Store"

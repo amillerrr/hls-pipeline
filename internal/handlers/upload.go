@@ -23,7 +23,7 @@ import (
 	"github.com/amillerrr/hls-pipeline/internal/storage"
 )
 
-var tracer = otel.Tracer("eye-api")
+var tracer = otel.Tracer("hls-api")
 
 type API struct {
 	s3Client    *storage.Client

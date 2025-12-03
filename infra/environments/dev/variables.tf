@@ -7,7 +7,7 @@ variable "aws_region" {
 variable "project_name" {
   description = "Base name for resources"
   type        = string
-  default     = "eye-of-storm"
+  default     = "hls-pipeline"
 }
 
 variable "root_domain" {

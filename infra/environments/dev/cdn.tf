@@ -1,6 +1,6 @@
 # CloudFront Origin Access Control
 resource "aws_cloudfront_origin_access_control" "default" {
-  name                              = "eye-oac-${random_string.suffix.result}"
+  name                              = "hls-oac-${random_string.suffix.result}"
   description                       = "Grant CloudFront access to S3"
   origin_access_control_origin_type = "s3"
   signing_behavior                  = "always"
@@ -17,7 +17,7 @@ resource "aws_cloudfront_distribution" "s3_distribution" {
 
   enabled             = true
   is_ipv6_enabled     = true
-  comment             = "Eye of the Storm HLS CDN"
+  comment             = "HLS Pipeline CDN"
   default_root_object = "index.html"
   aliases             = ["${var.subdomain_label}.${var.root_domain}"]
 

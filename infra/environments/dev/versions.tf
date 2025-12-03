@@ -13,10 +13,10 @@ terraform {
   }
 
   backend "s3" {
-    bucket         = "eye-tf-state-store"
+    bucket         = "hls-tf-state-store"
     key            = "dev/terraform.tfstate"
     region         = "us-west-2"
     encrypt        = true
-    dynamodb_table = "eye-tf-lock-table"
+    dynamodb_table = "hls-tf-lock-table"
   }
 }

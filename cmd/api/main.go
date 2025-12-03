@@ -31,7 +31,7 @@ func main() {
 		logger.Info(context.Background(), log, "No .env file found, relying on system ENV variables")
 	}
 
-	shutdownTracer := observability.InitTracer(context.Background(), "eye-api")
+	shutdownTracer := observability.InitTracer(context.Background(), "hls-api")
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -121,7 +121,7 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 
 	response := map[string]string{
 		"status":  "healthy",
-		"service": "eye-api",
+		"service": "hls-api",
 	}
 	if err := json.NewEncoder(w).Encode(response); err != nil {
 		logger.Error(context.Background(), slog.Default(), "Failed to encode health check response", "error", err)

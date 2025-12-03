@@ -11,12 +11,12 @@ locals {
         config = {
           scrape_configs = [
             {
-              job_name        = "eye-api"
+              job_name        = "hls-api"
               scrape_interval = "10s"
               static_configs  = [{ targets = ["localhost:8080"] }]
             },
             {
-              job_name        = "eye-worker"
+              job_name        = "hls-worker"
               scrape_interval = "10s"
               static_configs  = [{ targets = ["localhost:2112"] }]
             }
@@ -28,7 +28,7 @@ locals {
       awsxray = { region = var.aws_region }
       awsemf = {
         region                  = var.aws_region
-        namespace               = "EyeOfTheStorm"
+        namespace               = "HLSPipeline"
         dimension_rollup_option = "NoDimensionRollup"
       }
     }
@@ -44,7 +44,7 @@ locals {
       prometheus = {
         config = {
           scrape_configs = [{
-            job_name        = "eye-api"
+            job_name        = "hls-api"
             scrape_interval = "10s"
             static_configs  = [{ targets = ["localhost:8080"] }]
           }]
@@ -57,7 +57,7 @@ locals {
       prometheus = {
         config = {
           scrape_configs = [{
-            job_name        = "eye-worker"
+            job_name        = "hls-worker"
             scrape_interval = "10s"
             static_configs  = [{ targets = ["localhost:2112"] }]
           }]
@@ -69,7 +69,7 @@ locals {
 
 # Security Group for the api and worker
 resource "aws_security_group" "task_sg" {
-  name        = "eye-task-sg"
+  name        = "hls-task-sg"
   description = "Security group for ECS tasks"
   vpc_id      = aws_vpc.main.id
 
@@ -90,13 +90,13 @@ resource "aws_security_group" "task_sg" {
   }
 
   tags = {
-    Name = "eye-task-sg"
+    Name = "hls-task-sg"
   }
 }
 
 # ECS Cluster 
 resource "aws_ecs_cluster" "main" {
-  name = "eye-cluster"
+  name = "hls-cluster"
 
   setting {
     name  = "containerInsights"
@@ -105,11 +105,11 @@ resource "aws_ecs_cluster" "main" {
 }
 
 resource "aws_cloudwatch_log_group" "logs" {
-  name              = "/ecs/eye-logs"
+  name              = "/ecs/hls-logs"
   retention_in_days = 7
 
   tags = {
-    Application = "eye-of-storm"
+    Application = "hls-pipeline"
   }
 }
 
@@ -117,7 +117,7 @@ resource "aws_cloudwatch_log_group" "logs" {
 
 # API Task
 resource "aws_ecs_task_definition" "api" {
-  family                   = "eye-api"
+  family                   = "hls-api"
   network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
   cpu                      = 256
@@ -191,7 +191,7 @@ resource "aws_ecs_task_definition" "api" {
 
 # Worker Task
 resource "aws_ecs_task_definition" "worker" {
-  family                   = "eye-worker"
+  family                   = "hls-worker"
   network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
   cpu                      = 1024
@@ -254,7 +254,7 @@ resource "aws_ecs_task_definition" "worker" {
 # Services
 
 resource "aws_ecs_service" "api" {
-  name                              = "eye-api-svc"
+  name                              = "hls-api-svc"
   cluster                           = aws_ecs_cluster.main.id
   task_definition                   = aws_ecs_task_definition.api.arn
   desired_count                     = 1
@@ -291,7 +291,7 @@ resource "aws_ecs_service" "api" {
 }
 
 resource "aws_ecs_service" "worker" {
-  name                              = "eye-worker-svc"
+  name                              = "hls-worker-svc"
   cluster                           = aws_ecs_cluster.main.id
   task_definition                   = aws_ecs_task_definition.worker.arn
   desired_count                     = 1
@@ -327,7 +327,7 @@ resource "aws_appautoscaling_target" "worker" {
 
 # CloudWatch Metric Query
 resource "aws_cloudwatch_metric_alarm" "worker_backlog" {
-  alarm_name          = "eye-worker-backlog-scale-out"
+  alarm_name          = "hls-worker-backlog-scale-out"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 1
   threshold           = 0

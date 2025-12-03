@@ -1,5 +1,5 @@
 resource "aws_security_group" "lb_sg" {
-  name        = "eye-lb-sg"
+  name        = "hls-lb-sg"
   description = "Security group for ALB"
   vpc_id      = aws_vpc.main.id
 
@@ -28,13 +28,13 @@ resource "aws_security_group" "lb_sg" {
   }
 
   tags = {
-    Name = "eye-lb-sg"
+    Name = "hls-lb-sg"
   }
 }
 
 # Load Balancer 
 resource "aws_lb" "main" {
-  name               = "eye-alb"
+  name               = "hls-alb"
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.lb_sg.id]
@@ -50,13 +50,13 @@ resource "aws_lb" "main" {
   # }
 
   tags = {
-    Name = "eye-alb"
+    Name = "hls-alb"
   }
 }
 
 # Target Group
 resource "aws_lb_target_group" "api" {
-  name        = "eye-api-tg"
+  name        = "hls-api-tg"
   port        = 8080
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
@@ -75,7 +75,7 @@ resource "aws_lb_target_group" "api" {
   }
 
   tags = {
-    Name = "eye-api-tg"
+    Name = "hls-api-tg"
   }
 }
 

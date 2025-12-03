@@ -7,13 +7,13 @@ resource "random_string" "suffix" {
 
 # Raw Ingest Bucket
 resource "aws_s3_bucket" "raw_ingest" {
-  bucket        = "eye-raw-ingest-${random_string.suffix.result}"
+  bucket        = "hls-raw-ingest-${random_string.suffix.result}"
   force_destroy = true
 
   tags = {
-    Name        = "eye-raw-ingest"
+    Name        = "hls-raw-ingest"
     Environment = var.environment
-    Application = "eye-of-storm"
+    Application = "hls-pipeline"
   }
 }
 
@@ -66,13 +66,13 @@ resource "aws_s3_bucket_lifecycle_configuration" "raw_ingest_lifecycle" {
 
 # Processed Video Bucket 
 resource "aws_s3_bucket" "processed" {
-  bucket        = "eye-processed-${random_string.suffix.result}"
+  bucket        = "hls-processed-${random_string.suffix.result}"
   force_destroy = true
 
   tags = {
-    Name        = "eye-processed"
+    Name        = "hls-processed"
     Environment = var.environment
-    Application = "eye-of-storm"
+    Application = "hls-pipeline"
   }
 }
 

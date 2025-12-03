@@ -3,7 +3,7 @@ provider "aws" {
 
   default_tags {
     tags = {
-      Project     = "EyeOfTheStorm"
+      Project     = "HLSPipeline"
       Environment = "Dev"
       Owner       = "PipelineMentor"
       ManagedBy   = "Terraform"

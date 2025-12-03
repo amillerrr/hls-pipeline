@@ -34,20 +34,20 @@ import (
 	"github.com/amillerrr/hls-pipeline/internal/observability"
 )
 
-var tracer = otel.Tracer("eye-worker")
+var tracer = otel.Tracer("hls-worker")
 
 // Metrics
 var (
 	videosProcessed = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "eye_videos_processed_total",
+			Name: "hls_videos_processed_total",
 			Help: "Total number of videos processed",
 		},
 		[]string{"status"},
 	)
 	processingDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:    "eye_video_processing_duration_seconds",
+			Name:    "hls_video_processing_duration_seconds",
 			Help:    "Time taken to process videos",
 			Buckets: []float64{10, 30, 60, 120, 300, 600},
 		},
@@ -55,7 +55,7 @@ var (
 	)
 	qualityScore = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "eye_video_quality_score",
+			Name: "hls_video_quality_score",
 			Help: "Quality score (SSIM) for processed videos",
 		},
 		[]string{"metric_type"},
@@ -94,7 +94,7 @@ func main() {
 	}
 
 	// Initialize tracing
-	shutdownTracer := observability.InitTracer(context.Background(), "eye-worker")
+	shutdownTracer := observability.InitTracer(context.Background(), "hls-worker")
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

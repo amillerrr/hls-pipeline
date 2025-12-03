@@ -1,5 +1,5 @@
 resource "aws_ecr_repository" "api" {
-  name                 = "eye-api"
+  name                 = "hls-api"
   image_tag_mutability = "MUTABLE"
 
   image_scanning_configuration {
@@ -11,13 +11,13 @@ resource "aws_ecr_repository" "api" {
   }
 
   tags = {
-    Name = "eye-api"
-    Application = "eye-of-storm"
+    Name = "hls-api"
+    Application = "hls-pipeline"
   }
 }
 
 resource "aws_ecr_repository" "worker" {
-  name                 = "eye-worker"
+  name                 = "hls-worker"
   image_tag_mutability = "MUTABLE"
 
   image_scanning_configuration {
@@ -29,8 +29,8 @@ resource "aws_ecr_repository" "worker" {
   }
 
   tags = {
-    Name        = "eye-worker"
-    Application = "eye-of-storm"
+    Name        = "hls-worker"
+    Application = "hls-pipeline"
   }
 }
 

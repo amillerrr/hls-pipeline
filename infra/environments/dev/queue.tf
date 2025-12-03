@@ -1,5 +1,5 @@
 resource "aws_sqs_queue" "video_queue" {
-  name                       = "eye-video-queue-${var.environment}"
+  name                       = "hls-video-queue-${var.environment}"
   delay_seconds              = 0
   max_message_size           = 262144
   message_retention_seconds  = 86400   
@@ -14,33 +14,33 @@ resource "aws_sqs_queue" "video_queue" {
   })
 
   tags = {
-    Name        = "eye-video-queue"
+    Name        = "hls-video-queue"
     Environment = var.environment
-    Application = "eye-of-storm"
+    Application = "hls-pipeline"
   }
 }
 
 # Dead Letter Queue
 resource "aws_sqs_queue" "video_dlq" {
-  name                      = "eye-video-dlq-${var.environment}"
+  name                      = "hls-video-dlq-${var.environment}"
   message_retention_seconds = 1209600  # 14 days
 
   # FIXED: Added encryption
   sqs_managed_sse_enabled = true
 
   tags = {
-    Name        = "eye-video-dlq"
+    Name        = "hls-video-dlq"
     Environment = var.environment
-    Application = "eye-of-storm"
+    Application = "hls-pipeline"
   }
 }
 
 # SNS Topic for alerts
 resource "aws_sns_topic" "alerts" {
-  name = "eye-alerts-${var.environment}"
+  name = "hls-alerts-${var.environment}"
 
   tags = {
-    Name        = "eye-alerts"
+    Name        = "hls-alerts"
     Environment = var.environment
   }
 }
@@ -53,7 +53,7 @@ resource "aws_sns_topic_subscription" "alerts_email" {
 
 # DLQ alarm with action
 resource "aws_cloudwatch_metric_alarm" "dlq_messages" {
-  alarm_name          = "eye-dlq-messages-${var.environment}"
+  alarm_name          = "hls-dlq-messages-${var.environment}"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 1
   metric_name         = "ApproximateNumberOfMessagesVisible"
@@ -72,14 +72,14 @@ resource "aws_cloudwatch_metric_alarm" "dlq_messages" {
   ok_actions    = [aws_sns_topic.alerts.arn]
 
   tags = {
-    Name        = "eye-dlq-alarm"
+    Name        = "hls-dlq-alarm"
     Environment = var.environment
   }
 }
 
 # Queue depth alarm
 resource "aws_cloudwatch_metric_alarm" "queue_depth" {
-  alarm_name          = "eye-queue-depth-${var.environment}"
+  alarm_name          = "hls-queue-depth-${var.environment}"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 2
   metric_name         = "ApproximateNumberOfMessagesVisible"
@@ -97,14 +97,14 @@ resource "aws_cloudwatch_metric_alarm" "queue_depth" {
   alarm_actions = [aws_sns_topic.alerts.arn]
 
   tags = {
-    Name        = "eye-queue-depth-alarm"
+    Name        = "hls-queue-depth-alarm"
     Environment = var.environment
   }
 }
 
 # Messages age alarm
 resource "aws_cloudwatch_metric_alarm" "message_age" {
-  alarm_name          = "eye-message-age-${var.environment}"
+  alarm_name          = "hls-message-age-${var.environment}"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 1
   metric_name         = "ApproximateAgeOfOldestMessage"
@@ -122,7 +122,7 @@ resource "aws_cloudwatch_metric_alarm" "message_age" {
   alarm_actions = [aws_sns_topic.alerts.arn]
 
   tags = {
-    Name        = "eye-message-age-alarm"
+    Name        = "hls-message-age-alarm"
     Environment = var.environment
   }
 }

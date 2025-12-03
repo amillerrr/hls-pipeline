@@ -53,7 +53,7 @@ func GenerateToken(username string) (string, error) {
 			ExpiresAt: jwt.NewNumericDate(expirationTime),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			NotBefore: jwt.NewNumericDate(time.Now()),
-			Issuer:    "eye-of-storm",
+			Issuer:    "hls-pipeline",
 			Subject:   username,
 		},
 	}

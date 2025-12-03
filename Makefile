@@ -18,17 +18,17 @@ all: help
 bootstrap:
 	@echo "Creating Terraform state infrastructure..."
 	@aws s3api create-bucket \
-		--bucket eye-tf-state-store \
+		--bucket hls-tf-state-store \
 		--region $(AWS_REGION) \
 		--create-bucket-configuration LocationConstraint=$(AWS_REGION) 2>/dev/null || true
 	@aws s3api put-bucket-versioning \
-		--bucket eye-tf-state-store \
+		--bucket hls-tf-state-store \
 		--versioning-configuration Status=Enabled
 	@aws s3api put-bucket-encryption \
-		--bucket eye-tf-state-store \
+		--bucket hls-tf-state-store \
 		--server-side-encryption-configuration '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
 	@aws dynamodb create-table \
-		--table-name eye-tf-lock-table \
+		--table-name hls-tf-lock-table \
 		--attribute-definitions AttributeName=LockID,AttributeType=S \
 		--key-schema AttributeName=LockID,KeyType=HASH \
 		--billing-mode PAY_PER_REQUEST \
@@ -81,13 +81,13 @@ build: build-api build-worker
 # Build API Docker image
 build-api:
 	@echo "Building API image..."
-	@docker build -t eye-api:latest -f Dockerfile .
+	@docker build -t hls-api:latest -f Dockerfile .
 	@echo "API image built"
 
 # Build Worker Docker image
 build-worker:
 	@echo "Building Worker image..."
-	@docker build -t eye-worker:latest -f Dockerfile.worker .
+	@docker build -t hls-worker:latest -f Dockerfile.worker .
 	@echo "Worker image built"
 
 # Push images to ECR
@@ -97,7 +97,7 @@ push: push-api push-worker
 push-api:
 	@echo "Pushing API image to ECR..."
 	@aws ecr get-login-password --region $(AWS_REGION) | docker login --username AWS --password-stdin $(ECR_API_URL)
-	@docker tag eye-api:latest $(ECR_API_URL):latest
+	@docker tag hls-api:latest $(ECR_API_URL):latest
 	@docker push $(ECR_API_URL):latest
 	@echo "API image pushed"
 
@@ -105,15 +105,15 @@ push-api:
 push-worker:
 	@echo "Pushing Worker image to ECR..."
 	@aws ecr get-login-password --region $(AWS_REGION) | docker login --username AWS --password-stdin $(ECR_WORKER_URL)
-	@docker tag eye-worker:latest $(ECR_WORKER_URL):latest
+	@docker tag hls-worker:latest $(ECR_WORKER_URL):latest
 	@docker push $(ECR_WORKER_URL):latest
 	@echo "Worker image pushed"
 
 # Force new ECS deployment 
 ecs-deploy:
 	@echo "Forcing ECS service update..."
-	@aws ecs update-service --cluster eye-cluster --service eye-api-svc --force-new-deployment --region $(AWS_REGION) > /dev/null
-	@aws ecs update-service --cluster eye-cluster --service eye-worker-svc --force-new-deployment --region $(AWS_REGION) > /dev/null
+	@aws ecs update-service --cluster hls-cluster --service hls-api-svc --force-new-deployment --region $(AWS_REGION) > /dev/null
+	@aws ecs update-service --cluster hls-cluster --service hls-worker-svc --force-new-deployment --region $(AWS_REGION) > /dev/null
 	@echo "ECS services updating."
 
 # Development Targets
@@ -132,7 +132,7 @@ clean:
 	@echo "Cleaning..."
 	@rm -f .env coverage.out
 	@rm -rf tmp/
-	@docker rmi eye-api:latest eye-worker:latest 2>/dev/null || true
+	@docker rmi hls-api:latest hls-worker:latest 2>/dev/null || true
 	@echo "Clean complete"
 
 # Local Development
@@ -189,4 +189,3 @@ help:
 	@echo "Utilities:"
 	@grep -E '^## ' $(MAKEFILE_LIST) | grep -E '(upload-test|stress-test|oidc-setup|help):' | sed 's/## /  /' | column -t -s ':'
 	@echo ""
-

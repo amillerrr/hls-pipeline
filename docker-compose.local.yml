@@ -33,9 +33,9 @@ services:
       - AWS_ACCESS_KEY_ID=test
       - AWS_SECRET_ACCESS_KEY=test
       - AWS_ENDPOINT_URL=http://localstack:4566
-      - S3_BUCKET=eye-raw-ingest-dev
-      - PROCESSED_BUCKET=eye-processed-dev
-      - SQS_QUEUE_URL=http://localstack:4566/000000000000/eye-video-queue 
+      - S3_BUCKET=hls-raw-ingest-dev
+      - PROCESSED_BUCKET=hls-processed-dev
+      - SQS_QUEUE_URL=http://localstack:4566/000000000000/hls-video-queue 
       - CDN_DOMAIN=localhost:8080
       - JWT_SECRET=local-dev-secret-minimum-32-chars
       - API_USERNAME=admin
@@ -62,9 +62,9 @@ services:
       - AWS_ACCESS_KEY_ID=test
       - AWS_SECRET_ACCESS_KEY=test
       - AWS_ENDPOINT_URL=http://localstack:4566
-      - S3_BUCKET=eye-raw-ingest-dev
-      - PROCESSED_BUCKET=eye-processed-dev
-      - SQS_QUEUE_URL=http://localstack:4566/000000000000/eye-video-queue
+      - S3_BUCKET=hls-raw-ingest-dev
+      - PROCESSED_BUCKET=hls-processed-dev
+      - SQS_QUEUE_URL=http://localstack:4566/000000000000/hls-video-queue
       - MAX_CONCURRENT_JOBS=1
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
     depends_on:

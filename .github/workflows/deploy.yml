@@ -1,4 +1,4 @@
-name: "Eye of the Storm Project: CI/CD Pipeline"
+name: "HLS Pipeline: CI/CD Pipeline"
 
 on:
   push:
@@ -10,11 +10,11 @@ on:
 
 env:
   AWS_REGION: us-west-2
-  ECR_REPOSITORY_API: eye-api
-  ECR_REPOSITORY_WORKER: eye-worker
-  ECS_CLUSTER: eye-cluster
-  ECS_SERVICE_API: eye-api-svc
-  ECS_SERVICE_WORKER: eye-worker-svc
+  ECR_REPOSITORY_API: hls-api
+  ECR_REPOSITORY_WORKER: hls-worker
+  ECS_CLUSTER: hls-cluster
+  ECS_SERVICE_API: hls-api-svc
+  ECS_SERVICE_WORKER: hls-worker-svc
   CONTAINER_NAME_API: api
   CONTAINER_NAME_WORKER: worker
 
@@ -177,7 +177,7 @@ jobs:
       # Deploy api to ECS
       - name: Download API Task Definition
         run: |
-          aws ecs describe-task-definition --task-definition eye-api --query taskDefinition > task-def-api.json
+          aws ecs describe-task-definition --task-definition hls-api --query taskDefinition > task-def-api.json
 
       - name: Render New API Task Definition
         id: render-api
@@ -198,7 +198,7 @@ jobs:
       # Deploy worker to ECS
       - name: Download Worker Task Definition
         run: |
-          aws ecs describe-task-definition --task-definition eye-worker --query taskDefinition > task-def-worker.json
+          aws ecs describe-task-definition --task-definition hls-worker --query taskDefinition > task-def-worker.json
 
       - name: Render New Worker Task Definition
         id: render-worker
