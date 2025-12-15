@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -34,7 +35,56 @@ import (
 	"github.com/amillerrr/hls-pipeline/internal/observability"
 )
 
+// Configuration constants
+const (
+	// SQS settings
+	SQSMaxMessages       = 1
+	SQSWaitTimeSeconds   = 20
+	SQSVisibilityTimeout = 900 // 15 minutes
+
+	// Worker settings
+	DefaultMaxConcurrent = 1
+	MetricsPort          = 2112
+
+	// Timeouts
+	AWSConfigTimeout   = 10 * time.Second
+	ShutdownTimeout    = 5 * time.Second
+	RetryBackoffPeriod = 5 * time.Second
+
+	// HLS settings
+	HLSSegmentDuration = 6
+
+	// File paths
+	TempUploadDir = "/tmp/uploads"
+	TempHLSDir    = "/tmp/hls"
+)
+
+// Video quality presets
+var qualityPresets = []struct {
+	Name     string
+	Width    int
+	Height   int
+	Bitrate  string
+	MaxRate  string
+	BufSize  string
+	AudioBPS string
+}{
+	{"1080p", 1920, 1080, "5M", "5.5M", "7.5M", "192k"},
+	{"720p", 1280, 720, "2.5M", "2.75M", "5M", "128k"},
+	{"480p", 854, 480, "1M", "1.1M", "2M", "96k"},
+}
+
 var tracer = otel.Tracer("hls-worker")
+
+// Custom errors
+var (
+	ErrJobParseFailed  = errors.New("failed to parse job")
+	ErrDownloadFailed  = errors.New("failed to download video")
+	ErrTranscodeFailed = errors.New("failed to transcode video")
+	ErrUploadFailed    = errors.New("failed to upload HLS files")
+	ErrFFmpegFailed    = errors.New("ffmpeg failed")
+	ErrContextCanceled = errors.New("context canceled")
+)
 
 // Metrics
 var (
@@ -60,12 +110,35 @@ var (
 		},
 		[]string{"metric_type"},
 	)
+	activeJobs = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "hls_active_jobs",
+			Help: "Number of currently processing jobs",
+		},
+	)
+	downloadDuration = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "hls_video_download_duration_seconds",
+			Help:    "Time taken to download videos from S3",
+			Buckets: []float64{1, 5, 10, 30, 60, 120},
+		},
+	)
+	uploadDuration = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "hls_video_upload_duration_seconds",
+			Help:    "Time taken to upload HLS files to S3",
+			Buckets: []float64{1, 5, 10, 30, 60, 120},
+		},
+	)
 )
 
 func init() {
 	prometheus.MustRegister(videosProcessed)
 	prometheus.MustRegister(processingDuration)
 	prometheus.MustRegister(qualityScore)
+	prometheus.MustRegister(activeJobs)
+	prometheus.MustRegister(downloadDuration)
+	prometheus.MustRegister(uploadDuration)
 }
 
 type Worker struct {
@@ -85,6 +158,20 @@ type VideoJob struct {
 	Filename string `json:"filename"`
 }
 
+// Validate the video job fields
+func (j *VideoJob) Validate() error {
+	if j.VideoID == "" {
+		return errors.New("videoId is required")
+	}
+	if j.S3Key == "" {
+		return errors.New("s3Key is required")
+	}
+	if j.Bucket == "" {
+		return errors.New("bucket is required")
+	}
+	return nil
+}
+
 func main() {
 	log := logger.New()
 	slog.SetDefault(log)
@@ -96,7 +183,7 @@ func main() {
 	// Initialize tracing
 	shutdownTracer := observability.InitTracer(context.Background(), "hls-worker")
 	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), ShutdownTimeout)
 		defer cancel()
 		if err := shutdownTracer(shutdownCtx); err != nil {
 			logger.Error(context.Background(), log, "Failed to shutdown tracer", "error", err)
@@ -104,7 +191,7 @@ func main() {
 	}()
 
 	// AWS Config and SQS Initialization
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), AWSConfigTimeout)
 	defer cancel()
 
 	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(os.Getenv("AWS_REGION")))
@@ -114,7 +201,7 @@ func main() {
 	}
 	otelaws.AppendMiddlewares(&cfg.APIOptions)
 
-	maxConcurrent := 1
+	maxConcurrent := DefaultMaxConcurrent
 	if mc := os.Getenv("MAX_CONCURRENT_JOBS"); mc != "" {
 		if parsed, err := strconv.Atoi(mc); err == nil && parsed > 0 {
 			maxConcurrent = parsed
@@ -131,20 +218,14 @@ func main() {
 		maxConcurrent:   maxConcurrent,
 	}
 
+	// Validate required configuration
+	if err := worker.validateConfig(); err != nil {
+		logger.Error(context.Background(), log, "Invalid configuration", "error", err)
+		os.Exit(1)
+	}
+
 	// Start metrics server
-	go func() {
-		http.Handle("/metrics", promhttp.Handler())
-		http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			if _, err := w.Write([]byte("ok")); err != nil {
-				logger.Error(r.Context(), log, "Failed to write health response", "error", err)
-			}
-		})
-		logger.Info(context.Background(), log, "Starting metrics server", "port", "2112")
-		if err := http.ListenAndServe(":2112", nil); err != nil {
-			logger.Error(context.Background(), log, "Metrics server error", "error", err)
-		}
-	}()
+	go worker.startMetricsServer()
 
 	// Graceful shutdown
 	ctx, cancel = context.WithCancel(context.Background())
@@ -163,8 +244,43 @@ func main() {
 	worker.pollQueue(ctx)
 }
 
+func (w *Worker) validateConfig() error {
+	if w.sqsQueueURL == "" {
+		return errors.New("SQS_QUEUE_URL is required")
+	}
+	if w.rawBucket == "" {
+		return errors.New("S3_BUCKET is required")
+	}
+	if w.processedBucket == "" {
+		return errors.New("PROCESSED_BUCKET is required")
+	}
+	return nil
+}
+
+func (w *Worker) startMetricsServer() {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+	mux.HandleFunc("/health", func(rw http.ResponseWriter, r *http.Request) {
+		rw.WriteHeader(http.StatusOK)
+		if _, err := rw.Write([]byte(`{"status":"healthy"}`)); err != nil {
+			logger.Error(r.Context(), w.log, "Failed to write health response", "error", err)
+		}
+	})
+
+	server := &http.Server{
+		Addr:              fmt.Sprintf(":%d", MetricsPort),
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	logger.Info(context.Background(), w.log, "Starting metrics server", "port", MetricsPort)
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		logger.Error(context.Background(), w.log, "Metrics server error", "error", err)
+	}
+}
+
 func (w *Worker) pollQueue(ctx context.Context) {
-	logger.Info(ctx, w.log, "Starting queue polling", "queueURL", w.sqsQueueURL)
+	logger.Info(ctx, w.log, "Starting queue polling", "queueURL", w.sqsQueueURL, "maxConcurrent", w.maxConcurrent)
 
 	sem := make(chan struct{}, w.maxConcurrent)
 	var wg sync.WaitGroup
@@ -182,16 +298,16 @@ func (w *Worker) pollQueue(ctx context.Context) {
 		// Receive messages
 		result, err := w.sqsClient.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
 			QueueUrl:            aws.String(w.sqsQueueURL),
-			MaxNumberOfMessages: 1,
-			WaitTimeSeconds:     20,
-			VisibilityTimeout:   900, // 15 minutes
+			MaxNumberOfMessages: SQSMaxMessages,
+			WaitTimeSeconds:     SQSWaitTimeSeconds,
+			VisibilityTimeout:   SQSVisibilityTimeout,
 		})
 		if err != nil {
 			if ctx.Err() != nil {
 				continue // Shutting down
 			}
 			logger.Error(ctx, w.log, "Failed to receive messages", "error", err)
-			time.Sleep(5 * time.Second)
+			time.Sleep(RetryBackoffPeriod)
 			continue
 		}
 
@@ -204,7 +320,7 @@ func (w *Worker) pollQueue(ctx context.Context) {
 				defer func() { <-sem }() // Release semaphore
 
 				if err := w.processMessage(ctx, msg); err != nil {
-					logger.Error(ctx, w.log, "Failed to process message", "error", err)
+					logger.Error(ctx, w.log, "Failed to process message", "error", err, "messageId", safeStringDeref(msg.MessageId))
 					videosProcessed.WithLabelValues("failed").Inc()
 				} else {
 					// Delete message on success
@@ -222,13 +338,28 @@ func (w *Worker) pollQueue(ctx context.Context) {
 	}
 }
 
+func safeStringDeref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
 func (w *Worker) processMessage(ctx context.Context, msg types.Message) error {
 	ctx, span := tracer.Start(ctx, "process-message")
 	defer span.End()
 
+	if msg.Body == nil {
+		return fmt.Errorf("%w: empty message body", ErrJobParseFailed)
+	}
+
 	var job VideoJob
 	if err := json.Unmarshal([]byte(*msg.Body), &job); err != nil {
-		return fmt.Errorf("failed to parse job: %w", err)
+		return fmt.Errorf("%w: %v", ErrJobParseFailed, err)
+	}
+
+	if err := job.Validate(); err != nil {
+		return fmt.Errorf("%w: %v", ErrJobParseFailed, err)
 	}
 
 	span.SetAttributes(
@@ -241,23 +372,45 @@ func (w *Worker) processMessage(ctx context.Context, msg types.Message) error {
 	start := time.Now()
 
 	// Download video from S3
+	downloadStart := time.Now()
 	localPath, err := w.downloadVideo(ctx, job)
 	if err != nil {
-		return fmt.Errorf("failed to download video: %w", err)
+		return fmt.Errorf("%w: %v", ErrDownloadFailed, err)
 	}
-	defer os.Remove(localPath)
+	downloadDuration.Observe(time.Since(downloadStart).Seconds())
+	defer func() {
+		if removeErr := os.Remove(localPath); removeErr != nil && !os.IsNotExist(removeErr) {
+			logger.Warn(ctx, w.log, "Failed to remove temp file", "path", localPath, "error", removeErr)
+		}
+	}()
+
+	// Check for context cancellation before transcoding
+	if ctx.Err() != nil {
+		return fmt.Errorf("%w: before transcoding", ErrContextCanceled)
+	}
 
 	// Transcode to HLS
 	hlsDir, err := w.transcodeToHLS(ctx, job.VideoID, localPath)
 	if err != nil {
-		return fmt.Errorf("failed to transcode: %w", err)
+		return fmt.Errorf("%w: %v", ErrTranscodeFailed, err)
 	}
-	defer os.RemoveAll(hlsDir)
+	defer func() {
+		if removeErr := os.RemoveAll(hlsDir); removeErr != nil {
+			logger.Warn(ctx, w.log, "Failed to remove HLS dir", "path", hlsDir, "error", removeErr)
+		}
+	}()
+
+	// Check for context cancellation before uploading
+	if ctx.Err() != nil {
+		return fmt.Errorf("%w: before upload", ErrContextCanceled)
+	}
 
 	// Upload HLS files to S3
+	uploadStart := time.Now()
 	if err := w.uploadHLSFiles(ctx, job.VideoID, hlsDir); err != nil {
-		return fmt.Errorf("failed to upload HLS: %w", err)
+		return fmt.Errorf("%w: %v", ErrUploadFailed, err)
 	}
+	uploadDuration.Observe(time.Since(uploadStart).Seconds())
 
 	duration := time.Since(start).Seconds()
 	processingDuration.WithLabelValues("all").Observe(duration)
@@ -274,13 +427,18 @@ func (w *Worker) downloadVideo(ctx context.Context, job VideoJob) (string, error
 	ctx, span := tracer.Start(ctx, "download-video")
 	defer span.End()
 
+	// Ensure temp directory exists
+	if err := os.MkdirAll(TempUploadDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create temp directory: %w", err)
+	}
+
 	// Create temp file
 	ext := filepath.Ext(job.S3Key)
-	tmpFile, err := os.CreateTemp("/tmp/uploads", fmt.Sprintf("video-*%s", ext))
+	tmpFile, err := os.CreateTemp(TempUploadDir, fmt.Sprintf("video-*%s", ext))
 	if err != nil {
 		return "", fmt.Errorf("failed to create temp file: %w", err)
 	}
-	defer tmpFile.Close()
+	tmpPath := tmpFile.Name()
 
 	// Download from S3
 	result, err := w.s3Client.GetObject(ctx, &s3.GetObjectInput{
@@ -288,17 +446,32 @@ func (w *Worker) downloadVideo(ctx context.Context, job VideoJob) (string, error
 		Key:    aws.String(job.S3Key),
 	})
 	if err != nil {
-		os.Remove(tmpFile.Name())
-		return "", fmt.Errorf("failed to get object: %w", err)
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("failed to get object from S3: %w", err)
 	}
 	defer result.Body.Close()
 
-	if _, err := io.Copy(tmpFile, result.Body); err != nil {
-		os.Remove(tmpFile.Name())
+	// Copy to file
+	written, err := io.Copy(tmpFile, result.Body)
+	if err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
 		return "", fmt.Errorf("failed to write file: %w", err)
 	}
 
-	return tmpFile.Name(), nil
+	if err := tmpFile.Close(); err != nil {
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("failed to close temp file: %w", err)
+	}
+
+	span.SetAttributes(attribute.Int64("video.size_bytes", written))
+	logger.Info(ctx, w.log, "Downloaded video",
+		"videoId", job.VideoID,
+		"sizeBytes", written,
+	)
+
+	return tmpPath, nil
 }
 
 func (w *Worker) transcodeToHLS(ctx context.Context, videoID string, inputPath string) (string, error) {
@@ -306,11 +479,14 @@ func (w *Worker) transcodeToHLS(ctx context.Context, videoID string, inputPath s
 	defer span.End()
 
 	// Create output directory
-	hlsDir := filepath.Join("/tmp/hls", videoID)
-	for _, subdir := range []string{"1080p", "720p", "480p"} {
-		dirPath := filepath.Join(hlsDir, subdir)
+	hlsDir := filepath.Join(TempHLSDir, videoID)
+
+	// Create subdirectories for each quality level
+	for _, preset := range qualityPresets {
+		dirPath := filepath.Join(hlsDir, preset.Name)
 		if err := os.MkdirAll(dirPath, 0755); err != nil {
-			return "", fmt.Errorf("failed to create HLS subdir %s: %w", subdir, err)
+			os.RemoveAll(hlsDir) // Cleanup on error
+			return "", fmt.Errorf("failed to create HLS subdir %s: %w", preset.Name, err)
 		}
 	}
 
@@ -323,7 +499,7 @@ func (w *Worker) transcodeToHLS(ctx context.Context, videoID string, inputPath s
 	// Generate master playlist
 	if err := w.generateMasterPlaylist(hlsDir); err != nil {
 		os.RemoveAll(hlsDir)
-		return "", err
+		return "", fmt.Errorf("failed to generate master playlist: %w", err)
 	}
 
 	// Calculate quality metrics
@@ -339,7 +515,10 @@ func (w *Worker) runFFmpeg(ctx context.Context, inputPath, hlsDir string) error 
 	// Multi-bitrate HLS encoding
 	args := []string{
 		"-i", inputPath,
-		"-preset", "veryfast", "-g", "100", "-keyint_min", "100", "-sc_threshold", "0",
+		"-preset", "veryfast",
+		"-g", "100",
+		"-keyint_min", "100",
+		"-sc_threshold", "0",
 		"-filter_complex",
 		"[0:v]split=3[v1][v2][v3];" +
 			"[v1]scale=1920:1080[v1out];" +
@@ -349,21 +528,21 @@ func (w *Worker) runFFmpeg(ctx context.Context, inputPath, hlsDir string) error 
 		"-map", "[v1out]", "-map", "0:a?",
 		"-c:v:0", "libx264", "-b:v:0", "5M", "-maxrate:v:0", "5.5M", "-bufsize:v:0", "7.5M",
 		"-c:a:0", "aac", "-b:a:0", "192k",
-		"-hls_time", "6", "-hls_list_size", "0",
+		"-hls_time", fmt.Sprintf("%d", HLSSegmentDuration), "-hls_list_size", "0",
 		"-hls_segment_filename", filepath.Join(hlsDir, "1080p", "seg_%03d.ts"),
 		filepath.Join(hlsDir, "1080p", "playlist.m3u8"),
 		// 720p
 		"-map", "[v2out]", "-map", "0:a?",
 		"-c:v:1", "libx264", "-b:v:1", "2.5M", "-maxrate:v:1", "2.75M", "-bufsize:v:1", "5M",
 		"-c:a:1", "aac", "-b:a:1", "128k",
-		"-hls_time", "6", "-hls_list_size", "0",
+		"-hls_time", fmt.Sprintf("%d", HLSSegmentDuration), "-hls_list_size", "0",
 		"-hls_segment_filename", filepath.Join(hlsDir, "720p", "seg_%03d.ts"),
 		filepath.Join(hlsDir, "720p", "playlist.m3u8"),
 		// 480p
 		"-map", "[v3out]", "-map", "0:a?",
 		"-c:v:2", "libx264", "-b:v:2", "1M", "-maxrate:v:2", "1.1M", "-bufsize:v:2", "2M",
 		"-c:a:2", "aac", "-b:a:2", "96k",
-		"-hls_time", "6", "-hls_list_size", "0",
+		"-hls_time", fmt.Sprintf("%d", HLSSegmentDuration), "-hls_list_size", "0",
 		"-hls_segment_filename", filepath.Join(hlsDir, "480p", "seg_%03d.ts"),
 		filepath.Join(hlsDir, "480p", "playlist.m3u8"),
 	}
@@ -396,8 +575,8 @@ func (w *Worker) runFFmpeg(ctx context.Context, inputPath, hlsDir string) error 
 	// Drain stdout
 	go func() {
 		defer wg.Done()
-		if _, err := io.Copy(io.Discard, stdoutPipe); err != nil {
-			logger.Warn(ctx, w.log, "Failed to drain stdout", "error", err)
+		if _, copyErr := io.Copy(io.Discard, stdoutPipe); copyErr != nil {
+			logger.Warn(ctx, w.log, "Failed to drain stdout", "error", copyErr)
 		}
 	}()
 
@@ -406,7 +585,10 @@ func (w *Worker) runFFmpeg(ctx context.Context, inputPath, hlsDir string) error 
 	wg.Wait()
 
 	if cmdErr != nil {
-		return fmt.Errorf("ffmpeg failed: %w", cmdErr)
+		if ctx.Err() != nil {
+			return fmt.Errorf("%w: context canceled", ErrFFmpegFailed)
+		}
+		return fmt.Errorf("%w: %v", ErrFFmpegFailed, cmdErr)
 	}
 
 	return nil
@@ -420,7 +602,7 @@ func (w *Worker) monitorFFmpegOutput(ctx context.Context, r io.Reader) {
 			return
 		default:
 			line := scanner.Text()
-			// Log progress lines
+			// Log progress lines at debug level
 			if strings.Contains(line, "frame=") || strings.Contains(line, "time=") {
 				logger.Debug(ctx, w.log, "FFmpeg progress", "output", line)
 			} else if strings.Contains(line, "error") || strings.Contains(line, "Error") {
@@ -451,12 +633,16 @@ func (w *Worker) calculateQualityMetrics(ctx context.Context, inputPath, hlsDir 
 	refFrame := filepath.Join(hlsDir, "ref_frame.png")
 	distFrame := filepath.Join(hlsDir, "dist_frame.png")
 
-	defer os.Remove(refFrame)
-	defer os.Remove(distFrame)
+	defer func() {
+		os.Remove(refFrame)
+		os.Remove(distFrame)
+	}()
 
 	// Extract frame from source
-	err := exec.CommandContext(ctx, "ffmpeg", "-y", "-ss", "00:00:01", "-i", inputPath,
-		"-vf", "scale=1280:720", "-vframes", "1", refFrame).Run()
+	err := exec.CommandContext(ctx, "ffmpeg",
+		"-y", "-ss", "00:00:01", "-i", inputPath,
+		"-vf", "scale=1280:720", "-vframes", "1", refFrame,
+	).Run()
 	if err != nil {
 		logger.Warn(ctx, w.log, "Failed to extract reference frame (video too short?)", "error", err)
 		return
@@ -464,8 +650,10 @@ func (w *Worker) calculateQualityMetrics(ctx context.Context, inputPath, hlsDir 
 
 	// Extract frame from 720p output at 1s
 	playlist720 := filepath.Join(hlsDir, "720p", "playlist.m3u8")
-	err = exec.CommandContext(ctx, "ffmpeg", "-y", "-ss", "00:00:01", "-i", playlist720,
-		"-vframes", "1", distFrame).Run()
+	err = exec.CommandContext(ctx, "ffmpeg",
+		"-y", "-ss", "00:00:01", "-i", playlist720,
+		"-vframes", "1", distFrame,
+	).Run()
 	if err != nil {
 		logger.Warn(ctx, w.log, "Failed to extract dist frame", "error", err)
 		return
@@ -485,8 +673,8 @@ func (w *Worker) calculateQualityMetrics(ctx context.Context, inputPath, hlsDir 
 	// Parse SSIM from output
 	outputStr := string(output)
 	if idx := strings.Index(outputStr, "All:"); idx != -1 {
-		ssimStr := strings.TrimSpace(outputStr[idx+4 : idx+10])
-		if ssim, err := strconv.ParseFloat(ssimStr, 64); err == nil {
+		ssimStr := strings.TrimSpace(outputStr[idx+4 : min(idx+10, len(outputStr))])
+		if ssim, parseErr := strconv.ParseFloat(ssimStr, 64); parseErr == nil {
 			qualityScore.WithLabelValues("720p_vs_source").Set(ssim)
 			logger.Info(ctx, w.log, "SSIM score", "value", ssim)
 		}
@@ -497,7 +685,10 @@ func (w *Worker) uploadHLSFiles(ctx context.Context, videoID, hlsDir string) err
 	ctx, span := tracer.Start(ctx, "upload-hls")
 	defer span.End()
 
-	return filepath.Walk(hlsDir, func(path string, info os.FileInfo, err error) error {
+	var filesUploaded int
+	var totalBytes int64
+
+	err := filepath.Walk(hlsDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -510,19 +701,24 @@ func (w *Worker) uploadHLSFiles(ctx context.Context, videoID, hlsDir string) err
 			return nil
 		}
 
-		relPath, _ := filepath.Rel(hlsDir, path)
+		relPath, err := filepath.Rel(hlsDir, path)
+		if err != nil {
+			return fmt.Errorf("failed to get relative path: %w", err)
+		}
+
 		s3Key := fmt.Sprintf("hls/%s/%s", videoID, relPath)
 
 		file, err := os.Open(path)
 		if err != nil {
-			return fmt.Errorf("failed to open file: %w", err)
+			return fmt.Errorf("failed to open file %s: %w", path, err)
 		}
 		defer file.Close()
 
 		contentType := "application/octet-stream"
-		if strings.HasSuffix(path, ".m3u8") {
+		switch {
+		case strings.HasSuffix(path, ".m3u8"):
 			contentType = "application/vnd.apple.mpegurl"
-		} else if strings.HasSuffix(path, ".ts") {
+		case strings.HasSuffix(path, ".ts"):
 			contentType = "video/MP2T"
 		}
 
@@ -536,7 +732,26 @@ func (w *Worker) uploadHLSFiles(ctx context.Context, videoID, hlsDir string) err
 			return fmt.Errorf("failed to upload %s: %w", s3Key, err)
 		}
 
-		logger.Debug(ctx, w.log, "Uploaded file", "key", s3Key)
+		filesUploaded++
+		totalBytes += info.Size()
+		logger.Debug(ctx, w.log, "Uploaded file", "key", s3Key, "size", info.Size())
 		return nil
 	})
+
+	if err != nil {
+		return err
+	}
+
+	span.SetAttributes(
+		attribute.Int("files.uploaded", filesUploaded),
+		attribute.Int64("bytes.total", totalBytes),
+	)
+
+	logger.Info(ctx, w.log, "HLS upload complete",
+		"videoId", videoID,
+		"filesUploaded", filesUploaded,
+		"totalBytes", totalBytes,
+	)
+
+	return nil
 }

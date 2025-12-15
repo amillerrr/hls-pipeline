@@ -7,11 +7,15 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/joho/godotenv"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
@@ -23,6 +27,159 @@ import (
 	"github.com/amillerrr/hls-pipeline/internal/storage"
 )
 
+// Server configuration constants
+const (
+	DefaultPort           = "8080"
+	ReadTimeout           = 30 * time.Second
+	ReadHeaderTimeout     = 10 * time.Second
+	WriteTimeout          = 300 * time.Second
+	IdleTimeout           = 120 * time.Second
+	MaxHeaderBytes        = 1 << 20 // 1 MB
+	ShutdownTimeout       = 30 * time.Second
+	TracerShutdownTimeout = 5 * time.Second
+	AWSConfigTimeout      = 10 * time.Second
+	HealthCheckTimeout    = 5 * time.Second
+)
+
+// HealthChecker provides health check functionality
+type HealthChecker struct {
+	s3Client    *storage.Client
+	sqsClient   *sqs.Client
+	sqsQueueURL string
+	bucket      string
+	log         *slog.Logger
+	mu          sync.RWMutex
+	lastCheck   time.Time
+	lastStatus  *HealthStatus
+	cacheTTL    time.Duration
+}
+
+// HealthStatus represents the health check response
+type HealthStatus struct {
+	Status    string                    `json:"status"`
+	Service   string                    `json:"service"`
+	Timestamp string                    `json:"timestamp"`
+	Checks    map[string]ComponentCheck `json:"checks,omitempty"`
+}
+
+// ComponentCheck represents the health of a single component
+type ComponentCheck struct {
+	Status  string `json:"status"`
+	Latency string `json:"latency,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+// NewHealthChecker creates a new health checker
+func NewHealthChecker(s3Client *storage.Client, sqsClient *sqs.Client, sqsQueueURL, bucket string, log *slog.Logger) *HealthChecker {
+	return &HealthChecker{
+		s3Client:    s3Client,
+		sqsClient:   sqsClient,
+		sqsQueueURL: sqsQueueURL,
+		bucket:      bucket,
+		log:         log,
+		cacheTTL:    10 * time.Second, // Cache health check results for 10 seconds
+	}
+}
+
+// Check performs health checks on all dependencies
+func (h *HealthChecker) Check(ctx context.Context, deep bool) *HealthStatus {
+	// Return cached result if available and not deep check
+	if !deep {
+		h.mu.RLock()
+		if h.lastStatus != nil && time.Since(h.lastCheck) < h.cacheTTL {
+			status := h.lastStatus
+			h.mu.RUnlock()
+			return status
+		}
+		h.mu.RUnlock()
+	}
+
+	status := &HealthStatus{
+		Status:    "healthy",
+		Service:   "hls-api",
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Checks:    make(map[string]ComponentCheck),
+	}
+
+	// Only perform deep checks if requested
+	if deep {
+		// Check S3
+		s3Check := h.checkS3(ctx)
+		status.Checks["s3"] = s3Check
+		if s3Check.Status != "healthy" {
+			status.Status = "degraded"
+		}
+
+		// Check SQS
+		sqsCheck := h.checkSQS(ctx)
+		status.Checks["sqs"] = sqsCheck
+		if sqsCheck.Status != "healthy" {
+			status.Status = "degraded"
+		}
+	}
+
+	// Cache the result
+	h.mu.Lock()
+	h.lastCheck = time.Now()
+	h.lastStatus = status
+	h.mu.Unlock()
+
+	return status
+}
+
+func (h *HealthChecker) checkS3(ctx context.Context) ComponentCheck {
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(ctx, HealthCheckTimeout)
+	defer cancel()
+
+	_, err := h.s3Client.HeadBucket(ctx, &s3.HeadBucketInput{
+		Bucket: aws.String(h.bucket),
+	})
+
+	latency := time.Since(start)
+
+	if err != nil {
+		return ComponentCheck{
+			Status:  "unhealthy",
+			Latency: latency.String(),
+			Error:   err.Error(),
+		}
+	}
+
+	return ComponentCheck{
+		Status:  "healthy",
+		Latency: latency.String(),
+	}
+}
+
+func (h *HealthChecker) checkSQS(ctx context.Context) ComponentCheck {
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(ctx, HealthCheckTimeout)
+	defer cancel()
+
+	_, err := h.sqsClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+		QueueUrl: aws.String(h.sqsQueueURL),
+		AttributeNames: []types.QueueAttributeName{
+			types.QueueAttributeNameApproximateNumberOfMessages,
+		},
+	})
+
+	latency := time.Since(start)
+
+	if err != nil {
+		return ComponentCheck{
+			Status:  "unhealthy",
+			Latency: latency.String(),
+			Error:   err.Error(),
+		}
+	}
+
+	return ComponentCheck{
+		Status:  "healthy",
+		Latency: latency.String(),
+	}
+}
+
 func main() {
 	log := logger.New()
 	slog.SetDefault(log)
@@ -33,7 +190,7 @@ func main() {
 
 	shutdownTracer := observability.InitTracer(context.Background(), "hls-api")
 	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), TracerShutdownTimeout)
 		defer cancel()
 		if err := shutdownTracer(shutdownCtx); err != nil {
 			logger.Error(context.Background(), log, "Failed to shutdown tracer", "error", err)
@@ -41,7 +198,7 @@ func main() {
 	}()
 
 	// Initialize AWS & SQS
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), AWSConfigTimeout)
 	defer cancel()
 
 	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(os.Getenv("AWS_REGION")))
@@ -59,13 +216,26 @@ func main() {
 		os.Exit(1)
 	}
 
-	api := handlers.New(s3Client, sqsClient, os.Getenv("SQS_QUEUE_URL"), log)
+	// Validate required configuration
+	sqsQueueURL := os.Getenv("SQS_QUEUE_URL")
+	s3Bucket := os.Getenv("S3_BUCKET")
+	if sqsQueueURL == "" || s3Bucket == "" {
+		logger.Error(context.Background(), log, "Missing required environment variables",
+			"SQS_QUEUE_URL", sqsQueueURL != "",
+			"S3_BUCKET", s3Bucket != "",
+		)
+		os.Exit(1)
+	}
+
+	api := handlers.New(s3Client, sqsClient, sqsQueueURL, log)
+	healthChecker := NewHealthChecker(s3Client, sqsClient, sqsQueueURL, s3Bucket, log)
 
 	// Routing
 	mux := http.NewServeMux()
 
 	// Public endpoints
-	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/health", healthHandler(healthChecker))
+	mux.HandleFunc("/health/deep", deepHealthHandler(healthChecker))
 	mux.HandleFunc("/login", api.LoginHandler)
 	mux.HandleFunc("/latest", api.GetLatestVideoHandler)
 
@@ -76,6 +246,9 @@ func main() {
 	// Metrics endpoint
 	mux.Handle("/metrics", localOnlyMiddleware(promhttp.Handler()))
 
+	// Apply CORS middleware to the entire mux
+	handler := handlers.CORSMiddleware(mux)
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -83,12 +256,12 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              ":" + port,
-		Handler:           mux,
-		ReadTimeout:       30 * time.Second,
-		ReadHeaderTimeout: 10 * time.Second,
-		WriteTimeout:      300 * time.Second,
-		IdleTimeout:       120 * time.Second,
-		MaxHeaderBytes:    1 << 20,
+		Handler:           handler,
+		ReadTimeout:       ReadTimeout,
+		ReadHeaderTimeout: ReadHeaderTimeout,
+		WriteTimeout:      WriteTimeout,
+		IdleTimeout:       IdleTimeout,
+		MaxHeaderBytes:    MaxHeaderBytes,
 	}
 
 	// Graceful Shutdown
@@ -104,7 +277,7 @@ func main() {
 	<-quit
 
 	logger.Info(context.Background(), log, "Shutting down server...")
-	ctxShut, cancelShut := context.WithTimeout(context.Background(), 30*time.Second)
+	ctxShut, cancelShut := context.WithTimeout(context.Background(), ShutdownTimeout)
 	defer cancelShut()
 
 	if err := srv.Shutdown(ctxShut); err != nil {
@@ -115,16 +288,38 @@ func main() {
 }
 
 // ALB health check
-func healthHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
+func healthHandler(checker *HealthChecker) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		status := checker.Check(r.Context(), false)
 
-	response := map[string]string{
-		"status":  "healthy",
-		"service": "hls-api",
+		w.Header().Set("Content-Type", "application/json")
+		if status.Status != "healthy" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		} else {
+			w.WriteHeader(http.StatusOK)
+		}
+
+		if err := json.NewEncoder(w).Encode(status); err != nil {
+			logger.Error(r.Context(), slog.Default(), "Failed to encode health check response", "error", err)
+		}
 	}
-	if err := json.NewEncoder(w).Encode(response); err != nil {
-		logger.Error(context.Background(), slog.Default(), "Failed to encode health check response", "error", err)
+}
+
+// Return a detailed health check with dependency status
+func deepHealthHandler(checker *HealthChecker) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		status := checker.Check(r.Context(), true)
+
+		w.Header().Set("Content-Type", "application/json")
+		if status.Status != "healthy" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		} else {
+			w.WriteHeader(http.StatusOK)
+		}
+
+		if err := json.NewEncoder(w).Encode(status); err != nil {
+			logger.Error(r.Context(), slog.Default(), "Failed to encode health check response", "error", err)
+		}
 	}
 }
 

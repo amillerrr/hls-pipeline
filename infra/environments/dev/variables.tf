@@ -19,7 +19,7 @@ variable "root_domain" {
 variable "subdomain_label" {
   description = "The subdomain prefix"
   type        = string
-  default     = "toptal"
+  default     = "video"
 }
 
 variable "environment" {
@@ -44,4 +44,36 @@ variable "alert_email" {
   description = "Email address for CloudWatch alarm notifications"
   type        = string
   default     = "andrew@mill3r.la"
+}
+
+# Sensitive variables 
+# TF_VAR_api_username, TF_VAR_api_password, TF_VAR_jwt_secret
+
+variable "api_username" {
+  description = "Username for API authentication"
+  type        = string
+  default     = "admin"
+  sensitive   = true
+}
+
+variable "api_password" {
+  description = "Password for API authentication"
+  type        = string
+  sensitive   = true
+
+  validation {
+    condition     = length(var.api_password) >= 12
+    error_message = "API password must be at least 12 characters long."
+  }
+}
+
+variable "jwt_secret" {
+  description = "Secret key for JWT token signing (min 32 characters)"
+  type        = string
+  sensitive   = true
+
+  validation {
+    condition     = length(var.jwt_secret) >= 32
+    error_message = "JWT secret must be at least 32 characters long."
+  }
 }

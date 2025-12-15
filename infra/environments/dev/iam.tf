@@ -23,6 +23,27 @@ resource "aws_iam_role_policy_attachment" "ecs_execution_role_policy" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
+# Allow ECS execution role to read secrets from Secrets Manager
+resource "aws_iam_role_policy" "ecs_execution_secrets" {
+  name = "ecs-execution-secrets-access"
+  role = aws_iam_role.ecs_execution_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:GetSecretValue"
+        ]
+        Resource = [
+          aws_secretsmanager_secret.api_credentials.arn
+        ]
+      }
+    ]
+  })
+}
+
 # API Task Role
 resource "aws_iam_role" "api_task_role" {
   name = "hls-api-task-role"
@@ -64,7 +85,8 @@ resource "aws_iam_role_policy" "api_s3_raw_access" {
       {
         Effect = "Allow"
         Action = [
-          "s3:ListBucket"
+          "s3:ListBucket",
+          "s3:HeadBucket"
         ]
         Resource = aws_s3_bucket.raw_ingest.arn
       }
@@ -85,7 +107,8 @@ resource "aws_iam_role_policy" "api_s3_processed_read" {
         Action = [
           "s3:GetObject",
           "s3:HeadObject",
-          "s3:ListBucket"
+          "s3:ListBucket",
+          "s3:HeadBucket"
         ]
         Resource = [
           aws_s3_bucket.processed.arn,
@@ -435,4 +458,3 @@ output "worker_task_role_arn" {
   description = "ARN of the Worker task role"
   value       = aws_iam_role.worker_task_role.arn
 }
-

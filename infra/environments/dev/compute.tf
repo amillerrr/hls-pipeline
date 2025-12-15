@@ -67,6 +67,32 @@ locals {
   })
 }
 
+# Secrets Manager for sensitive configuration
+resource "aws_secretsmanager_secret" "api_credentials" {
+  name                    = "hls-pipeline/api-credentials-${var.environment}"
+  description             = "API credentials for HLS Pipeline"
+  recovery_window_in_days = var.environment == "prod" ? 30 : 0
+
+  tags = {
+    Name        = "hls-api-credentials"
+    Environment = var.environment
+    Application = "hls-pipeline"
+  }
+}
+
+resource "aws_secretsmanager_secret_version" "api_credentials" {
+  secret_id = aws_secretsmanager_secret.api_credentials.id
+  secret_string = jsonencode({
+    API_USERNAME = var.api_username
+    API_PASSWORD = var.api_password
+    JWT_SECRET   = var.jwt_secret
+  })
+
+  lifecycle {
+    ignore_changes = [secret_string]
+  }
+}
+
 # Security Group for the api and worker
 resource "aws_security_group" "task_sg" {
   name        = "hls-task-sg"
@@ -142,9 +168,21 @@ resource "aws_ecs_task_definition" "api" {
         { name = "OTEL_EXPORTER_OTLP_ENDPOINT", value = "http://localhost:4317" },
         { name = "PROCESSED_BUCKET", value = aws_s3_bucket.processed.bucket },
         { name = "CDN_DOMAIN", value = "${var.subdomain_label}.${var.root_domain}" },
-        { name = "ENV", value = "dev" },
-        { name = "API_USERNAME", value = "admin" },
-        { name = "API_PASSWORD", value = "changeme-use-secrets-manager" }
+        { name = "ENV", value = var.environment }
+      ]
+      secrets = [
+        {
+          name      = "API_USERNAME"
+          valueFrom = "${aws_secretsmanager_secret.api_credentials.arn}:API_USERNAME::"
+        },
+        {
+          name      = "API_PASSWORD"
+          valueFrom = "${aws_secretsmanager_secret.api_credentials.arn}:API_PASSWORD::"
+        },
+        {
+          name      = "JWT_SECRET"
+          valueFrom = "${aws_secretsmanager_secret.api_credentials.arn}:JWT_SECRET::"
+        }
       ]
       logConfiguration = {
         logDriver = "awslogs"
@@ -212,7 +250,7 @@ resource "aws_ecs_task_definition" "worker" {
         { name = "SQS_QUEUE_URL", value = aws_sqs_queue.video_queue.id },
         { name = "OTEL_EXPORTER_OTLP_ENDPOINT", value = "http://localhost:4317" },
         { name = "MAX_CONCURRENT_JOBS", value = "1" },
-        { name = "ENV", value = "dev" }
+        { name = "ENV", value = var.environment }
 
       ]
       logConfiguration = {

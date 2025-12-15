@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -25,6 +27,40 @@ import (
 
 var tracer = otel.Tracer("hls-api")
 
+// Configuration constants
+const (
+	PresignedURLExpiration = 10 * time.Minute
+	MaxFilenameLength      = 255
+	MaxListObjects         = 1000
+)
+
+// Allowed video extensions and content types
+var (
+	AllowedExtensions = map[string]bool{
+		".mp4":  true,
+		".mov":  true,
+		".avi":  true,
+		".mkv":  true,
+		".webm": true,
+	}
+
+	AllowedContentTypes = map[string]bool{
+		"video/mp4":        true,
+		"video/quicktime":  true,
+		"video/x-msvideo":  true,
+		"video/x-matroska": true,
+		"video/webm":       true,
+	}
+)
+
+// Custom errors
+var (
+	ErrInvalidFileType    = errors.New("invalid file type")
+	ErrFilenameTooLong    = errors.New("filename too long")
+	ErrInvalidContentType = errors.New("invalid content type")
+	ErrVideoNotFound      = errors.New("video not found")
+)
+
 type API struct {
 	s3Client    *storage.Client
 	sqsClient   *sqs.Client
@@ -41,7 +77,31 @@ func New(s3 *storage.Client, sqsClient *sqs.Client, sqsQueueURL string, log *slo
 	}
 }
 
-// Add CORS headers to the response
+// Handle CORS headers for all requests
+func CORSMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			origin = "*"
+		}
+
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Requested-With")
+		w.Header().Set("Access-Control-Max-Age", "86400")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+
+		// Handle preflight requests
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// Add CORS headers to the response for handlers not using middleware
 func (a *API) setCORSHeaders(w http.ResponseWriter, r *http.Request) {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
@@ -51,6 +111,48 @@ func (a *API) setCORSHeaders(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
 	w.Header().Set("Access-Control-Max-Age", "86400")
+}
+
+// Write JSON response with error handling
+func (a *API) writeJSON(ctx context.Context, w http.ResponseWriter, status int, data any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		logger.Error(ctx, a.log, "Failed to encode JSON response", "error", err)
+	}
+}
+
+// Write an error response
+func (a *API) writeError(ctx context.Context, w http.ResponseWriter, status int, message string) {
+	a.writeJSON(ctx, w, status, map[string]string{"error": message})
+}
+
+// Validate the upload filename
+func validateFilename(filename string) error {
+	if filename == "" {
+		return errors.New("filename is required")
+	}
+	if len(filename) > MaxFilenameLength {
+		return ErrFilenameTooLong
+	}
+
+	ext := strings.ToLower(filepath.Ext(filename))
+	if !AllowedExtensions[ext] {
+		return fmt.Errorf("%w: allowed extensions are mp4, mov, avi, mkv, webm", ErrInvalidFileType)
+	}
+
+	return nil
+}
+
+// Validate the content type
+func validateContentType(contentType string) error {
+	if contentType == "" {
+		return errors.New("content type is required")
+	}
+	if !AllowedContentTypes[contentType] {
+		return fmt.Errorf("%w: %s", ErrInvalidContentType, contentType)
+	}
+	return nil
 }
 
 // Handle user authentication and return JWT token
@@ -68,9 +170,19 @@ func (a *API) LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	clientIP := auth.GetClientIP(r)
+
+	// Check rate limiting before processing
+	if auth.IsRateLimited(clientIP) {
+		logger.Warn(ctx, a.log, "Rate limited login attempt", "ip", clientIP)
+		a.writeError(ctx, w, http.StatusTooManyRequests, "Too many failed attempts, try again later")
+		return
+	}
+
 	username, password, ok := r.BasicAuth()
 	if !ok {
-		http.Error(w, "Missing credentials", http.StatusUnauthorized)
+		auth.RecordAuthFailure(clientIP)
+		a.writeError(ctx, w, http.StatusUnauthorized, "Missing credentials")
 		return
 	}
 
@@ -81,7 +193,7 @@ func (a *API) LoginHandler(w http.ResponseWriter, r *http.Request) {
 		env := os.Getenv("ENV")
 		if env == "prod" || env == "production" {
 			logger.Error(ctx, a.log, "CRITICAL: API_USERNAME or API_PASSWORD not set in production")
-			http.Error(w, "Server configuration error", http.StatusInternalServerError)
+			a.writeError(ctx, w, http.StatusInternalServerError, "Server configuration error")
 			return
 		}
 		// Development fallback with warning
@@ -91,30 +203,32 @@ func (a *API) LoginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if username != expectedUsername || password != expectedPassword {
-		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
+		auth.RecordAuthFailure(clientIP)
+		logger.Warn(ctx, a.log, "Failed login attempt", "username", username, "ip", clientIP)
+		a.writeError(ctx, w, http.StatusUnauthorized, "Invalid credentials")
 		return
 	}
 
 	token, err := auth.GenerateToken(username)
 	if err != nil {
 		logger.Error(ctx, a.log, "Failed to generate token", "error", err)
-		http.Error(w, "Failed to generate token", http.StatusInternalServerError)
+		a.writeError(ctx, w, http.StatusInternalServerError, "Failed to generate token")
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(map[string]string{"token": token}); err != nil {
-		logger.Error(ctx, a.log, "Failed to encode response", "error", err)
-	}
+	auth.ResetAuthAttempts(clientIP)
+
+	logger.Info(ctx, a.log, "Successful login", "username", username, "ip", clientIP)
+	a.writeJSON(ctx, w, http.StatusOK, map[string]string{"token": token})
 }
 
-// Request payload for Init
+// Request payload for upload initialization
 type InitUploadRequest struct {
 	Filename    string `json:"filename"`
 	ContentType string `json:"contentType"`
 }
 
-// Response payload for Init
+// Response payload for upload initialization
 type InitUploadResponse struct {
 	UploadURL string `json:"uploadUrl"`
 	VideoID   string `json:"videoId"`
@@ -132,7 +246,7 @@ func (a *API) InitUploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		a.writeError(ctx, w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
@@ -142,52 +256,74 @@ func (a *API) InitUploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	var req InitUploadRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		span.RecordError(err)
+		a.writeError(ctx, w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
 
-	// Validate file extension
-	ext := strings.ToLower(filepath.Ext(req.Filename))
-	allowedExts := map[string]bool{
-		".mp4": true, ".mov": true, ".avi": true, ".mkv": true, ".webm": true,
+	// Validate filename
+	if err := validateFilename(req.Filename); err != nil {
+		span.RecordError(err)
+		a.writeError(ctx, w, http.StatusBadRequest, err.Error())
+		return
 	}
-	if !allowedExts[ext] {
-		http.Error(w, "Invalid file type. Allowed: mp4, mov, avi, mkv, webm", http.StatusBadRequest)
+
+	// Validate content type
+	if err := validateContentType(req.ContentType); err != nil {
+		span.RecordError(err)
+		a.writeError(ctx, w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	// Generate unique key
 	videoID := uuid.New().String()
+	ext := strings.ToLower(filepath.Ext(req.Filename))
 	s3Key := fmt.Sprintf("uploads/%s%s", videoID, ext)
 	bucket := os.Getenv("S3_BUCKET")
 
-	// Generate Presigned URL 
-	url, err := a.s3Client.GeneratePresignedURL(ctx, bucket, s3Key, req.ContentType, 15*time.Minute)
+	span.SetAttributes(
+		attribute.String("video.id", videoID),
+		attribute.String("video.key", s3Key),
+		attribute.String("video.content_type", req.ContentType),
+	)
+
+	// Generate Presigned URL
+	url, err := a.s3Client.GeneratePresignedURL(ctx, bucket, s3Key, req.ContentType, PresignedURLExpiration)
 	if err != nil {
-		logger.Error(ctx, a.log, "Failed to generate presigned URL", "error", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		span.RecordError(err)
+		logger.Error(ctx, a.log, "Failed to generate presigned URL", "error", err, "videoId", videoID)
+		a.writeError(ctx, w, http.StatusInternalServerError, "Internal server error")
 		return
 	}
 
-	logger.Info(ctx, a.log, "Generated presigned URL", "videoId", videoID, "key", s3Key)
+	logger.Info(ctx, a.log, "Generated presigned URL",
+		"videoId", videoID,
+		"key", s3Key,
+		"filename", req.Filename,
+	)
 
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(InitUploadResponse{
+	a.writeJSON(ctx, w, http.StatusOK, InitUploadResponse{
 		UploadURL: url,
 		VideoID:   videoID,
 		Key:       s3Key,
-	}); err != nil {
-    logger.Error(ctx, a.log, "Failed to encode response", "error", err)
-	}
+	})
 }
 
+// Request payload for completing an upload
 type CompleteUploadRequest struct {
 	VideoID  string `json:"videoId"`
 	Key      string `json:"key"`
 	Filename string `json:"filename"`
 }
 
-// Queue the Job
+// Response payload for completed uploads
+type CompleteUploadResponse struct {
+	VideoID string `json:"videoId"`
+	Status  string `json:"status"`
+	Message string `json:"message"`
+}
+
+// Verify the upload and queue the processing job
 func (a *API) CompleteUploadHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	a.setCORSHeaders(w, r)
@@ -198,7 +334,7 @@ func (a *API) CompleteUploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		a.writeError(ctx, w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
@@ -208,21 +344,51 @@ func (a *API) CompleteUploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	var req CompleteUploadRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
+		span.RecordError(err)
+		a.writeError(ctx, w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
+
+	// Validate required fields
+	if req.VideoID == "" {
+		a.writeError(ctx, w, http.StatusBadRequest, "videoId is required")
+		return
+	}
+	if req.Key == "" {
+		a.writeError(ctx, w, http.StatusBadRequest, "key is required")
+		return
+	}
+
+	span.SetAttributes(
+		attribute.String("video.id", req.VideoID),
+		attribute.String("video.key", req.Key),
+	)
 
 	bucket := os.Getenv("S3_BUCKET")
 
 	// Verify file exists in S3 before queuing
-	_, err := a.s3Client.HeadObject(ctx, &s3.HeadObjectInput{
+	headResult, err := a.s3Client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(req.Key),
 	})
 	if err != nil {
-		logger.Warn(ctx, a.log, "File not found in S3 during completion", "key", req.Key, "error", err)
-		http.Error(w, "Video file not found in S3", http.StatusNotFound)
+		span.RecordError(err)
+		logger.Warn(ctx, a.log, "File not found in S3 during completion",
+			"key", req.Key,
+			"videoId", req.VideoID,
+			"error", err,
+		)
+		a.writeError(ctx, w, http.StatusNotFound, "Video file not found in S3")
 		return
+	}
+
+	// Log file size for monitoring
+	if headResult.ContentLength != nil {
+		span.SetAttributes(attribute.Int64("video.size_bytes", *headResult.ContentLength))
+		logger.Info(ctx, a.log, "Upload verified",
+			"videoId", req.VideoID,
+			"sizeBytes", *headResult.ContentLength,
+		)
 	}
 
 	// Queue processing job
@@ -232,35 +398,49 @@ func (a *API) CompleteUploadHandler(w http.ResponseWriter, r *http.Request) {
 		"bucket":   bucket,
 		"filename": req.Filename,
 	}
-	messageBytes, _ := json.Marshal(message)
+
+	messageBytes, err := json.Marshal(message)
+	if err != nil {
+		span.RecordError(err)
+		logger.Error(ctx, a.log, "Failed to marshal message", "error", err, "videoId", req.VideoID)
+		a.writeError(ctx, w, http.StatusInternalServerError, "Internal server error")
+		return
+	}
 
 	_, err = a.sqsClient.SendMessage(ctx, &sqs.SendMessageInput{
 		QueueUrl:    aws.String(a.sqsQueueURL),
 		MessageBody: aws.String(string(messageBytes)),
 	})
 	if err != nil {
-		logger.Error(ctx, a.log, "Failed to queue processing job", "error", err, "videoId", req.VideoID)
-		http.Error(w, "Failed to queue job", http.StatusInternalServerError)
+		span.RecordError(err)
+		logger.Error(ctx, a.log, "Failed to queue processing job",
+			"error", err,
+			"videoId", req.VideoID,
+		)
+		a.writeError(ctx, w, http.StatusInternalServerError, "Failed to queue job")
 		return
 	}
 
 	logger.Info(ctx, a.log, "Processing job queued", "videoId", req.VideoID)
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
-	if err := json.NewEncoder(w).Encode(map[string]string{
-		"videoId": req.VideoID,
-		"status":  "processing",
-		"message": "Video queued for processing",
-	}); err != nil {
-		logger.Error(ctx, a.log, "Failed to encode response", "error", err)
-	}
+	a.writeJSON(ctx, w, http.StatusAccepted, CompleteUploadResponse{
+		VideoID: req.VideoID,
+		Status:  "processing",
+		Message: "Video queued for processing",
+	})
+}
+
+// Response payload for the latest video endpoint
+type LatestVideoResponse struct {
+	VideoID     string `json:"videoId"`
+	PlaybackURL string `json:"playbackUrl"`
+	ProcessedAt string `json:"processedAt"`
 }
 
 // Return the most recently processed video
 func (a *API) GetLatestVideoHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	a.setCORSHeaders(w, r)	
+	a.setCORSHeaders(w, r)
 
 	// Handle CORS preflight
 	if r.Method == http.MethodOptions {
@@ -269,7 +449,7 @@ func (a *API) GetLatestVideoHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		a.writeError(ctx, w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
@@ -279,20 +459,30 @@ func (a *API) GetLatestVideoHandler(w http.ResponseWriter, r *http.Request) {
 	processedBucket := os.Getenv("PROCESSED_BUCKET")
 	cdnDomain := os.Getenv("CDN_DOMAIN")
 
+	if processedBucket == "" || cdnDomain == "" {
+		logger.Error(ctx, a.log, "Missing required environment variables",
+			"PROCESSED_BUCKET", processedBucket != "",
+			"CDN_DOMAIN", cdnDomain != "",
+		)
+		a.writeError(ctx, w, http.StatusInternalServerError, "Server configuration error")
+		return
+	}
+
 	// List objects to find the most recent
 	result, err := a.s3Client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 		Bucket:  aws.String(processedBucket),
 		Prefix:  aws.String("hls/"),
-		MaxKeys: aws.Int32(1000),
+		MaxKeys: aws.Int32(MaxListObjects),
 	})
 	if err != nil {
+		span.RecordError(err)
 		logger.Error(ctx, a.log, "Failed to list processed videos", "error", err)
-		http.Error(w, "Failed to retrieve videos", http.StatusInternalServerError)
+		a.writeError(ctx, w, http.StatusInternalServerError, "Failed to retrieve videos")
 		return
 	}
 
 	if len(result.Contents) == 0 {
-		http.Error(w, "No processed videos found", http.StatusNotFound)
+		a.writeError(ctx, w, http.StatusNotFound, "No processed videos found")
 		return
 	}
 
@@ -300,8 +490,8 @@ func (a *API) GetLatestVideoHandler(w http.ResponseWriter, r *http.Request) {
 	var latestKey string
 	var latestTime time.Time
 	for _, obj := range result.Contents {
-		if strings.HasSuffix(*obj.Key, "master.m3u8") {
-			if obj.LastModified.After(latestTime) {
+		if obj.Key != nil && strings.HasSuffix(*obj.Key, "master.m3u8") {
+			if obj.LastModified != nil && obj.LastModified.After(latestTime) {
 				latestTime = *obj.LastModified
 				latestKey = *obj.Key
 			}
@@ -309,7 +499,7 @@ func (a *API) GetLatestVideoHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if latestKey == "" {
-		http.Error(w, "No processed videos found", http.StatusNotFound)
+		a.writeError(ctx, w, http.StatusNotFound, "No processed videos found")
 		return
 	}
 
@@ -320,14 +510,16 @@ func (a *API) GetLatestVideoHandler(w http.ResponseWriter, r *http.Request) {
 		videoID = parts[1]
 	}
 
+	span.SetAttributes(
+		attribute.String("video.id", videoID),
+		attribute.String("video.key", latestKey),
+	)
+
 	playbackURL := fmt.Sprintf("https://%s/%s", cdnDomain, latestKey)
 
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(map[string]any{
-		"videoId":     videoID,
-		"playbackUrl": playbackURL,
-		"processedAt": latestTime.Format(time.RFC3339),
-	}); err != nil {
-		logger.Error(ctx, a.log, "Failed to encode response", "error", err)
-	}
+	a.writeJSON(ctx, w, http.StatusOK, LatestVideoResponse{
+		VideoID:     videoID,
+		PlaybackURL: playbackURL,
+		ProcessedAt: latestTime.Format(time.RFC3339),
+	})
 }
