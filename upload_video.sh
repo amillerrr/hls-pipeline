@@ -7,11 +7,18 @@ if [ -f .env ]; then
 fi
 
 # Fallback values
-DEFAULT_URL="https://api.toptal.miller.today"
+DEFAULT_URL="https://api.video.miller.today"
 BASE_URL="${1:-${API_ENDPOINT:-$DEFAULT_URL}}"
 VIDEO_FILE="./test_assets/tempest_input.mp4"
-USERNAME="admin"
-PASSWORD="changeme-use-secrets-manager"
+USERNAME="${API_USERNAME:-admin}"
+PASSWORD="${API_PASSWORD:-}"
+
+if [ -z "$PASSWORD" ]; then
+    echo "Error: API_PASSWORD environment variable is not set."
+    echo "Set it via: export API_PASSWORD='your-password'"
+    echo "Or create a .env file with API_PASSWORD=your-password"
+    exit 1
+fi
 
 echo "Targeting: $BASE_URL"
 

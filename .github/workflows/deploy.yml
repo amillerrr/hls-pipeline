@@ -118,9 +118,9 @@ jobs:
             ${{ runner.os }}-go-
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v4
+        uses: golangci/golangci-lint-action@v6
         with:
-          version: v2.7.2
+          version: v1.62]2
           args: --timeout=5m
 
   # Continuous Delivery Stage
@@ -209,7 +209,7 @@ jobs:
           image: ${{ steps.build-api.outputs.image }}
 
       - name: Deploy API to ECS
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
         with:
           task-definition: ${{ steps.render-api.outputs.task-definition }}
           service: ${{ env.ECS_SERVICE_API }}
@@ -230,7 +230,7 @@ jobs:
           image: ${{ steps.build-worker.outputs.image }}
 
       - name: Deploy Worker to ECS
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
         with:
           task-definition: ${{ steps.render-worker.outputs.task-definition }}
           service: ${{ env.ECS_SERVICE_WORKER }}

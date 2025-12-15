@@ -1,8 +1,3 @@
-# Example terraform.tfvars file
-# IMPORTANT: Do NOT commit this file to version control!
-# Copy this to terraform.tfvars and fill in your values
-# Or set environment variables: TF_VAR_api_password, TF_VAR_jwt_secret
-
 # API authentication credentials
 api_username = "admin"
 api_password = "your-secure-password-here-min-12-chars"

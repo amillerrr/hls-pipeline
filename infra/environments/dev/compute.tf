@@ -1,4 +1,6 @@
 locals {
+  otel_collector_image = "public.ecr.aws/aws-observability/aws-otel-collector:v0.46.0"
+
   base_otel = {
     receivers = {
       otlp = {
@@ -202,7 +204,7 @@ resource "aws_ecs_task_definition" "api" {
     },
     {
       name      = "aws-otel-collector"
-      image     = "public.ecr.aws/aws-observability/aws-otel-collector:latest"
+      image     = local.otel_collector_image
       cpu       = 0
       essential = true
       environment = [
@@ -261,10 +263,17 @@ resource "aws_ecs_task_definition" "worker" {
           "awslogs-stream-prefix" = "worker"
         }
       }
+      healthCheck = {
+        command     = ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:2112/health || exit 1"]
+        interval    = 30
+        timeout     = 5
+        retries     = 3
+        startPeriod = 60
+      }
     },
     {
       name      = "aws-otel-collector"
-      image     = "public.ecr.aws/aws-observability/aws-otel-collector:latest"
+      image     = local.otel_collector_image
       cpu       = 0
       essential = true
       environment = [

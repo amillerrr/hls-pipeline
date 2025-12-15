@@ -42,6 +42,8 @@ var claimsKey contextKey = "claims"
 type rateLimiter struct {
 	mu       sync.RWMutex
 	attempts map[string]*attemptInfo
+	stopCh   chan struct{}
+	stopped  bool
 }
 
 type attemptInfo struct {
@@ -51,6 +53,7 @@ type attemptInfo struct {
 
 var authRateLimiter = &rateLimiter{
 	attempts: make(map[string]*attemptInfo),
+	stopCh:   make(chan struct{}),
 }
 
 func init() {
@@ -84,16 +87,36 @@ func (rl *rateLimiter) cleanup() {
 	ticker := time.NewTicker(CleanupInterval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		rl.mu.Lock()
-		now := time.Now()
-		for ip, info := range rl.attempts {
-			if now.Sub(info.firstFail) > RateLimitWindow {
-				delete(rl.attempts, ip)
+	for {
+		select {
+		case <-rl.stopCh:
+			return
+		case <-ticker.C:
+			rl.mu.Lock()
+			now := time.Now()
+			for ip, info := range rl.attempts {
+				if now.Sub(info.firstFail) > RateLimitWindow {
+					delete(rl.attempts, ip)
+				}
 			}
+			rl.mu.Unlock()
 		}
-		rl.mu.Unlock()
 	}
+}
+
+// Stop the rate limiter cleanup goroutine
+func (rl *rateLimiter) Stop() {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	if !rl.stopped {
+		close(rl.stopCh)
+		rl.stopped = true
+	}
+}
+
+// Stop the background cleanup goroutine (for graceful shutdown)
+func StopRateLimiter() {
+	authRateLimiter.Stop()
 }
 
 func (rl *rateLimiter) isRateLimited(ip string) bool {

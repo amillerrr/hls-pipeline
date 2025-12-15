@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
@@ -69,7 +70,7 @@ type ComponentCheck struct {
 	Error   string `json:"error,omitempty"`
 }
 
-// NewHealthChecker creates a new health checker
+// Create a new health checker
 func NewHealthChecker(s3Client *storage.Client, sqsClient *sqs.Client, sqsQueueURL, bucket string, log *slog.Logger) *HealthChecker {
 	return &HealthChecker{
 		s3Client:    s3Client,
@@ -267,7 +268,7 @@ func main() {
 	// Graceful Shutdown
 	go func() {
 		logger.Info(context.Background(), log, "Starting API Server", "port", port)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error(context.Background(), log, "Server error", "error", err)
 		}
 	}()
@@ -277,6 +278,10 @@ func main() {
 	<-quit
 
 	logger.Info(context.Background(), log, "Shutting down server...")
+
+	// Stop the rate limiter cleanup goroutine
+	auth.StopRateLimiter()
+
 	ctxShut, cancelShut := context.WithTimeout(context.Background(), ShutdownTimeout)
 	defer cancelShut()
 

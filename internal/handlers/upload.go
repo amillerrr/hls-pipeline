@@ -32,6 +32,7 @@ const (
 	PresignedURLExpiration = 10 * time.Minute
 	MaxFilenameLength      = 255
 	MaxListObjects         = 1000
+	MaxRequestBodySize     = 1 << 20
 )
 
 // Allowed video extensions and content types
@@ -125,6 +126,11 @@ func (a *API) writeJSON(ctx context.Context, w http.ResponseWriter, status int, 
 // Write an error response
 func (a *API) writeError(ctx context.Context, w http.ResponseWriter, status int, message string) {
 	a.writeJSON(ctx, w, status, map[string]string{"error": message})
+}
+
+// Wrap the request body with a size limit
+func (a *API) limitedBodyReader(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodySize)
 }
 
 // Validate the upload filename
@@ -257,6 +263,12 @@ func (a *API) InitUploadHandler(w http.ResponseWriter, r *http.Request) {
 	var req InitUploadRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		span.RecordError(err)
+		// Check if it's a request too large error
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			a.writeError(ctx, w, http.StatusRequestEntityTooLarge, "Request body too large")
+			return
+		}
 		a.writeError(ctx, w, http.StatusBadRequest, "Invalid request body")
 		return
 	}

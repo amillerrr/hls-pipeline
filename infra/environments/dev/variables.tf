@@ -60,6 +60,7 @@ variable "api_password" {
   description = "Password for API authentication"
   type        = string
   sensitive   = true
+  nullable    = false
 
   validation {
     condition     = length(var.api_password) >= 12
@@ -71,6 +72,7 @@ variable "jwt_secret" {
   description = "Secret key for JWT token signing (min 32 characters)"
   type        = string
   sensitive   = true
+  nullable    = false
 
   validation {
     condition     = length(var.jwt_secret) >= 32

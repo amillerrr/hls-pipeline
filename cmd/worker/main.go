@@ -701,6 +701,11 @@ func (w *Worker) uploadHLSFiles(ctx context.Context, videoID, hlsDir string) err
 			return nil
 		}
 
+		// Check for context cancellation before each upload
+		if ctx.Err() != nil {
+			return fmt.Errorf("%w: during upload", ErrContextCanceled)
+		}
+
 		relPath, err := filepath.Rel(hlsDir, path)
 		if err != nil {
 			return fmt.Errorf("failed to get relative path: %w", err)
