@@ -81,7 +81,15 @@ func New(s3 *storage.Client, sqsClient *sqs.Client, sqsQueueURL string, log *slo
 // Handle CORS headers for all requests
 func CORSMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		setCORSHeadersInternal(w, r)
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			origin = "*"
+		}
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Requested-With")
+		w.Header().Set("Access-Control-Max-Age", "86400")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
 
 		// Handle preflight requests
 		if r.Method == http.MethodOptions {
@@ -91,24 +99,6 @@ func CORSMiddleware(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
-}
-
-// Add CORS headers
-func setCORSHeadersInternal(w http.ResponseWriter, r *http.Request) {
-	origin := r.Header.Get("Origin")
-	if origin == "" {
-		origin = "*"
-	}
-	w.Header().Set("Access-Control-Allow-Origin", origin)
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Requested-With")
-	w.Header().Set("Access-Control-Max-Age", "86400")
-	w.Header().Set("Access-Control-Allow-Credentials", "true")
-}
-
-// Add CORS headers to the response for handlers not using middleware
-func (a *API) setCORSHeaders(w http.ResponseWriter, r *http.Request) {
-	setCORSHeadersInternal(w, r)
 }
 
 // Write JSON response with error handling
@@ -161,12 +151,6 @@ func validateContentType(contentType string) error {
 // Handle user authentication and return JWT token
 func (a *API) LoginHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	a.setCORSHeaders(w, r)
-
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
 
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -241,12 +225,6 @@ type InitUploadResponse struct {
 // Generate Presigned URL
 func (a *API) InitUploadHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	a.setCORSHeaders(w, r)
-
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
 
 	if r.Method != http.MethodPost {
 		a.writeError(ctx, w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -337,12 +315,6 @@ type CompleteUploadResponse struct {
 // Verify the upload and queue the processing job
 func (a *API) CompleteUploadHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	a.setCORSHeaders(w, r)
-
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
 
 	if r.Method != http.MethodPost {
 		a.writeError(ctx, w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -358,6 +330,11 @@ func (a *API) CompleteUploadHandler(w http.ResponseWriter, r *http.Request) {
 	var req CompleteUploadRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		span.RecordError(err)
+		var maxBytesErr *http.MaxBytesError
+    if errors.As(err, &maxBytesErr) {
+        a.writeError(ctx, w, http.StatusRequestEntityTooLarge, "Request body too large")
+        return
+    }
 		a.writeError(ctx, w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -453,13 +430,6 @@ type LatestVideoResponse struct {
 // Return the most recently processed video
 func (a *API) GetLatestVideoHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	a.setCORSHeaders(w, r)
-
-	// Handle CORS preflight
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
 
 	if r.Method != http.MethodGet {
 		a.writeError(ctx, w, http.StatusMethodNotAllowed, "Method not allowed")

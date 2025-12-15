@@ -58,6 +58,9 @@ const (
 	// File paths
 	TempUploadDir = "/tmp/uploads"
 	TempHLSDir    = "/tmp/hls"
+
+	// Upload settings
+	MaxConcurrentUploads = 20
 )
 
 // Video quality presets
@@ -69,10 +72,11 @@ var qualityPresets = []struct {
 	MaxRate  string
 	BufSize  string
 	AudioBPS string
+	Bandwidth int
 }{
-	{"1080p", 1920, 1080, "5M", "5.5M", "7.5M", "192k"},
-	{"720p", 1280, 720, "2.5M", "2.75M", "5M", "128k"},
-	{"480p", 854, 480, "1M", "1.1M", "2M", "96k"},
+	{"1080p", 1920, 1080, "5M", "5.5M", "7.5M", "192k", 5500000},
+	{"720p", 1280, 720, "2.5M", "2.75M", "5M", "128k", 2750000},
+	{"480p", 854, 480, "1M", "1.1M", "2M", "96k", 1100000},
 }
 
 var tracer = otel.Tracer("hls-worker")
@@ -622,16 +626,16 @@ func (w *Worker) monitorFFmpegOutput(ctx context.Context, r io.Reader) {
 }
 
 func (w *Worker) generateMasterPlaylist(hlsDir string) error {
-	masterContent := `#EXTM3U
-#EXT-X-VERSION:3
-#EXT-X-STREAM-INF:BANDWIDTH=5500000,RESOLUTION=1920x1080
-1080p/playlist.m3u8
-#EXT-X-STREAM-INF:BANDWIDTH=2750000,RESOLUTION=1280x720
-720p/playlist.m3u8
-#EXT-X-STREAM-INF:BANDWIDTH=1100000,RESOLUTION=854x480
-480p/playlist.m3u8
-`
-	return os.WriteFile(filepath.Join(hlsDir, "master.m3u8"), []byte(masterContent), 0644)
+	var builder strings.Builder
+	builder.WriteString("#EXTM3U\n")
+	builder.WriteString("#EXT-X-VERSION:3\n")
+
+	for _, preset := range qualityPresets {
+		builder.WriteString(fmt.Sprintf("#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d\n",
+			preset.Bandwidth, preset.Width, preset.Height))
+		builder.WriteString(fmt.Sprintf("%s/playlist.m3u8\n", preset.Name))
+	}
+	return os.WriteFile(filepath.Join(hlsDir, "master.m3u8"), []byte(builder.String()), 0644)
 }
 
 func (w *Worker) calculateQualityMetrics(ctx context.Context, inputPath, hlsDir string) {
@@ -695,14 +699,13 @@ func (w *Worker) uploadHLSFiles(ctx context.Context, videoID, hlsDir string) err
 	defer span.End()
 
 	// Atomic counters for thread safety
-	var filesUploaded int64
-	var totalBytes int64
+	var filesUploaded atomic.Int64
+	var totalBytes atomic.Int64
+	var firstErr atomic.Pointer[error]
 
 	// Concurrency control
-	const maxUploaders = 20
-	sem := make(chan struct{}, maxUploaders)
+	sem := make(chan struct{}, MaxConcurrentUploads)
 	var wg sync.WaitGroup
-	errChan := make(chan error, 1)
 
 	walkErr := filepath.Walk(hlsDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -714,6 +717,10 @@ func (w *Worker) uploadHLSFiles(ctx context.Context, videoID, hlsDir string) err
 
 		// Skip temporary files
 		if strings.HasSuffix(path, ".png") {
+			return nil
+		}
+
+		if firstErr.Load() != nil {
 			return nil
 		}
 
@@ -731,19 +738,15 @@ func (w *Worker) uploadHLSFiles(ctx context.Context, videoID, hlsDir string) err
 			defer func() { <-sem }() // Release semaphore
 
 			// Check if previous error occurred
-			select {
-			case <-errChan:
+			if firstErr.Load() != nil {
 				return
-			default:
 			}
 
 			// Calculate Key
 			relPath, err := filepath.Rel(hlsDir, filePath)
 			if err != nil {
-				select {
-				case errChan <- fmt.Errorf("failed to get relative path: %w", err):
-				default:
-				}
+				wrappedErr := fmt.Errorf("failed to get relative path: %w", err)
+				firstErr.CompareAndSwap(nil, &wrappedErr)
 				return
 			}
 			s3Key := fmt.Sprintf("hls/%s/%s", videoID, relPath)
@@ -751,10 +754,8 @@ func (w *Worker) uploadHLSFiles(ctx context.Context, videoID, hlsDir string) err
 			// Open File
 			file, err := os.Open(filePath)
 			if err != nil {
-				select {
-				case errChan <- fmt.Errorf("failed to open file %s: %w", filePath, err):
-				default:
-				}
+				wrappedErr := fmt.Errorf("failed to open file %s: %w", filePath, err)
+				firstErr.CompareAndSwap(nil, &wrappedErr)
 				return
 			}
 			defer file.Close()
@@ -776,19 +777,17 @@ func (w *Worker) uploadHLSFiles(ctx context.Context, videoID, hlsDir string) err
 				ContentType: aws.String(contentType),
 			})
 			if err != nil {
-				select {
-				case errChan <- fmt.Errorf("failed to upload %s: %w", s3Key, err):
-				default:
-				}
+				wrappedErr := fmt.Errorf("failed to upload %s: %w", s3Key, err)
+				firstErr.CompareAndSwap(nil, &wrappedErr)
 				return
 			}
 
 			// Update Metrics Atomically
-			atomic.AddInt64(&filesUploaded, 1)
-			atomic.AddInt64(&totalBytes, fileInfo.Size())
+			filesUploaded.Add(1)
+			totalBytes.Add(fileInfo.Size())
 			
-            // Use Debug level to reduce log noise
-            logger.Debug(ctx, w.log, "Uploaded file", "key", s3Key)
+			// Use Debug level to reduce log noise
+			logger.Debug(ctx, w.log, "Uploaded file", "key", s3Key)
 
 		}(path, info)
 
@@ -804,21 +803,22 @@ func (w *Worker) uploadHLSFiles(ctx context.Context, videoID, hlsDir string) err
 	}
 
 	// Check for async upload errors
-	select {
-	case err := <-errChan:
-		return err
-	default:
+	if errPtr := firstErr.Load(); errPtr != nil {
+		return *errPtr
 	}
 
+	uploaded := filesUploaded.Load()
+	bytes := totalBytes.Load()
+
 	span.SetAttributes(
-		attribute.Int64("files.uploaded", filesUploaded),
-		attribute.Int64("bytes.total", totalBytes),
+		attribute.Int64("files.uploaded", uploaded),
+		attribute.Int64("bytes.total", bytes),
 	)
 
 	logger.Info(ctx, w.log, "HLS upload complete",
 		"videoId", videoID,
-		"filesUploaded", filesUploaded,
-		"totalBytes", totalBytes,
+		"filesUploaded", uploaded,
+		"totalBytes", bytes,
 	)
 	return nil
 }
