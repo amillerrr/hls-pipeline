@@ -81,16 +81,7 @@ func New(s3 *storage.Client, sqsClient *sqs.Client, sqsQueueURL string, log *slo
 // Handle CORS headers for all requests
 func CORSMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		origin := r.Header.Get("Origin")
-		if origin == "" {
-			origin = "*"
-		}
-
-		w.Header().Set("Access-Control-Allow-Origin", origin)
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Requested-With")
-		w.Header().Set("Access-Control-Max-Age", "86400")
-		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		setCORSHeadersInternal(w, r)
 
 		// Handle preflight requests
 		if r.Method == http.MethodOptions {
@@ -102,16 +93,22 @@ func CORSMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// Add CORS headers to the response for handlers not using middleware
-func (a *API) setCORSHeaders(w http.ResponseWriter, r *http.Request) {
+// Add CORS headers
+func setCORSHeadersInternal(w http.ResponseWriter, r *http.Request) {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
 		origin = "*"
 	}
 	w.Header().Set("Access-Control-Allow-Origin", origin)
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Requested-With")
 	w.Header().Set("Access-Control-Max-Age", "86400")
+	w.Header().Set("Access-Control-Allow-Credentials", "true")
+}
+
+// Add CORS headers to the response for handlers not using middleware
+func (a *API) setCORSHeaders(w http.ResponseWriter, r *http.Request) {
+	setCORSHeadersInternal(w, r)
 }
 
 // Write JSON response with error handling
