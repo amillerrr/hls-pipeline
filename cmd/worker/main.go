@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -519,9 +520,13 @@ func (w *Worker) runFFmpeg(ctx context.Context, inputPath, hlsDir string) error 
 	args := []string{
 		"-i", inputPath,
 		"-preset", "veryfast",
+		"-c:v", "libx264",
+		"-profile:v", "main",
+		"-level", "4.1",
 		"-g", "100",
 		"-keyint_min", "100",
 		"-sc_threshold", "0",
+		"-flags", "+cgop",
 		"-filter_complex",
 		fmt.Sprintf("[0:v]split=%d[v1][v2][v3];"+
 			"[v1]scale=%d:%d[v1out];"+
@@ -689,10 +694,17 @@ func (w *Worker) uploadHLSFiles(ctx context.Context, videoID, hlsDir string) err
 	ctx, span := tracer.Start(ctx, "upload-hls")
 	defer span.End()
 
-	var filesUploaded int
+	// Atomic counters for thread safety
+	var filesUploaded int64
 	var totalBytes int64
 
-	err := filepath.Walk(hlsDir, func(path string, info os.FileInfo, err error) error {
+	// Concurrency control
+	const maxUploaders = 20
+	sem := make(chan struct{}, maxUploaders)
+	var wg sync.WaitGroup
+	errChan := make(chan error, 1)
+
+	walkErr := filepath.Walk(hlsDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -705,54 +717,101 @@ func (w *Worker) uploadHLSFiles(ctx context.Context, videoID, hlsDir string) err
 			return nil
 		}
 
-		// Check for context cancellation before each upload
-		if ctx.Err() != nil {
-			return fmt.Errorf("%w: during upload", ErrContextCanceled)
+		// Acquire semaphore (blocks if limit reached)
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			return fmt.Errorf("%w: during upload walk", ErrContextCanceled)
 		}
 
-		relPath, err := filepath.Rel(hlsDir, path)
-		if err != nil {
-			return fmt.Errorf("failed to get relative path: %w", err)
-		}
+		wg.Add(1)
 
-		s3Key := fmt.Sprintf("hls/%s/%s", videoID, relPath)
+		go func(filePath string, fileInfo os.FileInfo) {
+			defer wg.Done()
+			defer func() { <-sem }() // Release semaphore
 
-		file, err := os.Open(path)
-		if err != nil {
-			return fmt.Errorf("failed to open file %s: %w", path, err)
-		}
-		defer file.Close()
+			// Check if previous error occurred
+			select {
+			case <-errChan:
+				return
+			default:
+			}
 
-		contentType := "application/octet-stream"
-		switch {
-		case strings.HasSuffix(path, ".m3u8"):
-			contentType = "application/vnd.apple.mpegurl"
-		case strings.HasSuffix(path, ".ts"):
-			contentType = "video/MP2T"
-		}
+			// Calculate Key
+			relPath, err := filepath.Rel(hlsDir, filePath)
+			if err != nil {
+				select {
+				case errChan <- fmt.Errorf("failed to get relative path: %w", err):
+				default:
+				}
+				return
+			}
+			s3Key := fmt.Sprintf("hls/%s/%s", videoID, relPath)
 
-		_, err = w.s3Client.PutObject(ctx, &s3.PutObjectInput{
-			Bucket:      aws.String(w.processedBucket),
-			Key:         aws.String(s3Key),
-			Body:        file,
-			ContentType: aws.String(contentType),
-		})
-		if err != nil {
-			return fmt.Errorf("failed to upload %s: %w", s3Key, err)
-		}
+			// Open File
+			file, err := os.Open(filePath)
+			if err != nil {
+				select {
+				case errChan <- fmt.Errorf("failed to open file %s: %w", filePath, err):
+				default:
+				}
+				return
+			}
+			defer file.Close()
 
-		filesUploaded++
-		totalBytes += info.Size()
-		logger.Debug(ctx, w.log, "Uploaded file", "key", s3Key, "size", info.Size())
+			// Determine Content Type
+			contentType := "application/octet-stream"
+			switch {
+			case strings.HasSuffix(filePath, ".m3u8"):
+				contentType = "application/vnd.apple.mpegurl"
+			case strings.HasSuffix(filePath, ".ts"):
+				contentType = "video/MP2T"
+			}
+
+			// Upload
+			_, err = w.s3Client.PutObject(ctx, &s3.PutObjectInput{
+				Bucket:      aws.String(w.processedBucket),
+				Key:         aws.String(s3Key),
+				Body:        file,
+				ContentType: aws.String(contentType),
+			})
+			if err != nil {
+				select {
+				case errChan <- fmt.Errorf("failed to upload %s: %w", s3Key, err):
+				default:
+				}
+				return
+			}
+
+			// Update Metrics Atomically
+			atomic.AddInt64(&filesUploaded, 1)
+			atomic.AddInt64(&totalBytes, fileInfo.Size())
+			
+            // Use Debug level to reduce log noise
+            logger.Debug(ctx, w.log, "Uploaded file", "key", s3Key)
+
+		}(path, info)
+
 		return nil
 	})
 
-	if err != nil {
+	// Wait for all uploads to complete
+	wg.Wait()
+
+	// Check for walk errors
+	if walkErr != nil {
+		return walkErr
+	}
+
+	// Check for async upload errors
+	select {
+	case err := <-errChan:
 		return err
+	default:
 	}
 
 	span.SetAttributes(
-		attribute.Int("files.uploaded", filesUploaded),
+		attribute.Int64("files.uploaded", filesUploaded),
 		attribute.Int64("bytes.total", totalBytes),
 	)
 
@@ -761,6 +820,5 @@ func (w *Worker) uploadHLSFiles(ctx context.Context, videoID, hlsDir string) err
 		"filesUploaded", filesUploaded,
 		"totalBytes", totalBytes,
 	)
-
 	return nil
 }
