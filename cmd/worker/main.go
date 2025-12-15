@@ -319,6 +319,9 @@ func (w *Worker) pollQueue(ctx context.Context) {
 				defer wg.Done()
 				defer func() { <-sem }() // Release semaphore
 
+				activeJobs.Inc()
+				defer activeJobs.Dec()
+
 				if err := w.processMessage(ctx, msg); err != nil {
 					logger.Error(ctx, w.log, "Failed to process message", "error", err, "messageId", safeStringDeref(msg.MessageId))
 					videosProcessed.WithLabelValues("failed").Inc()
@@ -512,7 +515,7 @@ func (w *Worker) runFFmpeg(ctx context.Context, inputPath, hlsDir string) error 
 	ctx, span := tracer.Start(ctx, "ffmpeg-transcode")
 	defer span.End()
 
-	// Multi-bitrate HLS encoding
+	// Build FFmpeg args using quality presets
 	args := []string{
 		"-i", inputPath,
 		"-preset", "veryfast",
@@ -520,31 +523,32 @@ func (w *Worker) runFFmpeg(ctx context.Context, inputPath, hlsDir string) error 
 		"-keyint_min", "100",
 		"-sc_threshold", "0",
 		"-filter_complex",
-		"[0:v]split=3[v1][v2][v3];" +
-			"[v1]scale=1920:1080[v1out];" +
-			"[v2]scale=1280:720[v2out];" +
-			"[v3]scale=854:480[v3out]",
-		// 1080p
-		"-map", "[v1out]", "-map", "0:a?",
-		"-c:v:0", "libx264", "-b:v:0", "5M", "-maxrate:v:0", "5.5M", "-bufsize:v:0", "7.5M",
-		"-c:a:0", "aac", "-b:a:0", "192k",
-		"-hls_time", fmt.Sprintf("%d", HLSSegmentDuration), "-hls_list_size", "0",
-		"-hls_segment_filename", filepath.Join(hlsDir, "1080p", "seg_%03d.ts"),
-		filepath.Join(hlsDir, "1080p", "playlist.m3u8"),
-		// 720p
-		"-map", "[v2out]", "-map", "0:a?",
-		"-c:v:1", "libx264", "-b:v:1", "2.5M", "-maxrate:v:1", "2.75M", "-bufsize:v:1", "5M",
-		"-c:a:1", "aac", "-b:a:1", "128k",
-		"-hls_time", fmt.Sprintf("%d", HLSSegmentDuration), "-hls_list_size", "0",
-		"-hls_segment_filename", filepath.Join(hlsDir, "720p", "seg_%03d.ts"),
-		filepath.Join(hlsDir, "720p", "playlist.m3u8"),
-		// 480p
-		"-map", "[v3out]", "-map", "0:a?",
-		"-c:v:2", "libx264", "-b:v:2", "1M", "-maxrate:v:2", "1.1M", "-bufsize:v:2", "2M",
-		"-c:a:2", "aac", "-b:a:2", "96k",
-		"-hls_time", fmt.Sprintf("%d", HLSSegmentDuration), "-hls_list_size", "0",
-		"-hls_segment_filename", filepath.Join(hlsDir, "480p", "seg_%03d.ts"),
-		filepath.Join(hlsDir, "480p", "playlist.m3u8"),
+		fmt.Sprintf("[0:v]split=%d[v1][v2][v3];"+
+			"[v1]scale=%d:%d[v1out];"+
+			"[v2]scale=%d:%d[v2out];"+
+			"[v3]scale=%d:%d[v3out]",
+			len(qualityPresets),
+			qualityPresets[0].Width, qualityPresets[0].Height,
+			qualityPresets[1].Width, qualityPresets[1].Height,
+			qualityPresets[2].Width, qualityPresets[2].Height),
+	}
+
+	// Add output streams for each quality preset
+	for i, preset := range qualityPresets {
+		streamArgs := []string{
+			"-map", fmt.Sprintf("[v%dout]", i+1), "-map", "0:a?",
+			fmt.Sprintf("-c:v:%d", i), "libx264",
+			fmt.Sprintf("-b:v:%d", i), preset.Bitrate,
+			fmt.Sprintf("-maxrate:v:%d", i), preset.MaxRate,
+			fmt.Sprintf("-bufsize:v:%d", i), preset.BufSize,
+			fmt.Sprintf("-c:a:%d", i), "aac",
+			fmt.Sprintf("-b:a:%d", i), preset.AudioBPS,
+			"-hls_time", fmt.Sprintf("%d", HLSSegmentDuration),
+			"-hls_list_size", "0",
+			"-hls_segment_filename", filepath.Join(hlsDir, preset.Name, "seg_%03d.ts"),
+			filepath.Join(hlsDir, preset.Name, "playlist.m3u8"),
+		}
+		args = append(args, streamArgs...)
 	}
 
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)

@@ -4,7 +4,6 @@
 *.tfstate.backup
 .terraform.lock.hcl
 *.tfvars
-*.tfvars.example
 
 # Secrets
 .env

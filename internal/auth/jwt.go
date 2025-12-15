@@ -204,7 +204,7 @@ func GenerateToken(username string) (string, error) {
 		return "", errors.New("username cannot be empty")
 	}
 
-	expirationTime := time.Now().Add(24 * time.Hour)
+	expirationTime := time.Now().Add(TokenExpiration)
 
 	claims := &Claims{
 		Username: username,
@@ -242,7 +242,7 @@ func ValidateToken(tokenString string) (*Claims, error) {
 	}
 
 	if !token.Valid {
-		return nil, fmt.Errorf("invalid token")
+		return nil, ErrInvalidToken
 	}
 
 	if claims.Username == "" {
@@ -270,7 +270,7 @@ func AuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 
 		parts := strings.Split(authHeader, " ")
-		if len(parts) != 2 || parts[0] != "Bearer" {
+		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
 			RecordAuthFailure(clientIP)
 			http.Error(w, "Invalid authorization format", http.StatusUnauthorized)
 			return

@@ -263,8 +263,8 @@ go version  # Should be 1.24+
 make deploy
 
 # This will output:
-# - API_ENDPOINT: https://api.toptal.miller.today
-# - CDN_DOMAIN: toptal.miller.today
+# - API_ENDPOINT: https://api.video.miller.today
+# - CDN_DOMAIN: video.miller.today
 # - ECR repository URLs
 ```
 
@@ -313,14 +313,14 @@ Open `index.html` for a minimal debug interface.
 After processing completes, retrieve the playback URL:
 
 ```bash
-curl https://api.toptal.miller.today/latest
+curl https://api.video.miller.today/latest
 ```
 
 Response:
 ```json
 {
   "videoId": "abc123",
-  "playbackUrl": "https://toptal.miller.today/hls/abc123/master.m3u8",
+  "playbackUrl": "https://video.miller.today/hls/abc123/master.m3u8",
   "processedAt": "2025-11-28T10:30:00Z"
 }
 ```

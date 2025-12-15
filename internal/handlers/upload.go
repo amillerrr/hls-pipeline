@@ -260,6 +260,8 @@ func (a *API) InitUploadHandler(w http.ResponseWriter, r *http.Request) {
 		trace.WithAttributes(attribute.String("handler", "init-upload")))
 	defer span.End()
 
+	a.limitedBodyReader(w, r)
+
 	var req InitUploadRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		span.RecordError(err)
@@ -353,6 +355,8 @@ func (a *API) CompleteUploadHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, span := tracer.Start(ctx, "complete-upload-handler",
 		trace.WithAttributes(attribute.String("handler", "complete-upload")))
 	defer span.End()
+
+	a.limitedBodyReader(w, r)
 
 	var req CompleteUploadRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
