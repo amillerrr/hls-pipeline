@@ -43,7 +43,6 @@ type rateLimiter struct {
 	mu       sync.RWMutex
 	attempts map[string]*attemptInfo
 	stopCh   chan struct{}
-	stopped  bool
 	stopOnce sync.Once
 }
 

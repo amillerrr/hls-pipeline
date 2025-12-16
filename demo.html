@@ -313,7 +313,8 @@
     const qualityLevels = document.getElementById('quality-levels');
     const statusBadge = document.getElementById('status-badge');
     
-    const API_ENDPOINT = 'https://api.video.miller.today/latest';
+    const API_ENDPOINT = new URLSearchParams(window.location.search).get('api') 
+      || 'https://api.video.miller.today/latest';
     let hls = null;
     let startTime = Date.now();
     

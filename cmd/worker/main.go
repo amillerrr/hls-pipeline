@@ -659,13 +659,15 @@ func (w *Worker) monitorFFmpegOutput(ctx context.Context, r io.Reader) {
 			return
 		default:
 			line := scanner.Text()
-			// Log progress lines at debug level
 			if strings.Contains(line, "frame=") || strings.Contains(line, "time=") {
 				logger.Debug(ctx, w.log, "FFmpeg progress", "output", line)
 			} else if strings.Contains(line, "error") || strings.Contains(line, "Error") {
 				logger.Warn(ctx, w.log, "FFmpeg warning", "output", line)
 			}
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		logger.Warn(ctx, w.log, "FFmpeg output scanner error", "error", err)
 	}
 }
 

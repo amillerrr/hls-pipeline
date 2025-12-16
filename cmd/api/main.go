@@ -325,7 +325,7 @@ func healthHandler(checker *HealthChecker) http.HandlerFunc {
 		}
 
 		if err := json.NewEncoder(w).Encode(status); err != nil {
-			logger.Error(r.Context(), slog.Default(), "Failed to encode health check response", "error", err)
+			logger.Error(r.Context(), checker.log, "Failed to encode health check response", "error", err)
 		}
 	}
 }

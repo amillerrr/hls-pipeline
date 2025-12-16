@@ -38,7 +38,6 @@ resource "aws_acm_certificate_validation" "alb_cert" {
 
 # CloudFront certificate
 resource "aws_acm_certificate" "cdn_cert" {
-  provider          = aws.us_east_1
   domain_name       = local.cdn_domain
   validation_method = "DNS"
 
