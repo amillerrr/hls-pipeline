@@ -1,12 +1,18 @@
 #!/bin/bash
 
-BASE_URL="${1:-${API_ENDPOINT:-http://localhost:8080}}"
+if [ -f .env ]; then
+    set -a
+    source .env
+    set +a
+fi
+
+BASE_URL="${1:-${API_ENDPOINT:-https://api.video.miller.today}}"
 USERNAME="${API_USERNAME:-admin}"
 PASSWORD="${API_PASSWORD:-}"
 
 if [ -z "$PASSWORD" ]; then
     echo "Error: API_PASSWORD environment variable is not set."
-    echo "For local development, set: export API_PASSWORD='secret'"
+    echo "For local development, set: export API_PASSWORD='your-password'"
     exit 1
 fi
 

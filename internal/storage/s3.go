@@ -26,17 +26,7 @@ func NewS3Client(ctx context.Context) (*Client, error) {
 		return nil, fmt.Errorf("unable to load SDK config: %w", err)
 	}
 
-	endpoint := os.Getenv("S3_ENDPOINT")
-	var s3Client *s3.Client
-
-	if endpoint != "" {
-		s3Client = s3.NewFromConfig(cfg, func(o *s3.Options) {
-			o.BaseEndpoint = aws.String(endpoint)
-			o.UsePathStyle = true // Required for MinIO/LocalStack
-		})
-	} else {
-		s3Client = s3.NewFromConfig(cfg)
-	}
+	s3Client := s3.NewFromConfig(cfg)
 
 	return &Client{s3Client}, nil
 }

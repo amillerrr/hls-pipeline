@@ -45,15 +45,15 @@ const (
 
 // HealthChecker provides health check functionality
 type HealthChecker struct {
-	s3Client    *storage.Client
-	sqsClient   *sqs.Client
-	sqsQueueURL string
-	bucket      string
-	log         *slog.Logger
-	mu          sync.RWMutex
-	lastCheck   time.Time
-	lastStatus  *HealthStatus
-	cacheTTL    time.Duration
+	s3Client      *storage.Client
+	sqsClient     *sqs.Client
+	sqsQueueURL   string
+	bucket        string
+	log           *slog.Logger
+	mu            sync.RWMutex
+	lastCheck     time.Time
+	lastStatus    *HealthStatus
+	cacheTTL      time.Duration
 	lastDeepCheck time.Time
 }
 
@@ -360,21 +360,20 @@ func deepHealthHandler(checker *HealthChecker, log *slog.Logger) http.HandlerFun
 
 		if err := json.NewEncoder(w).Encode(status); err != nil {
 			logger.Error(r.Context(), log, "Failed to encode health check response", "error", err)
-		}	}
+		}
+	}
 }
 
 // Restrict access to localhost
 func localOnlyMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		remoteAddr := r.RemoteAddr
-
-		// Allow localhost connections (sidecar)
-		if isLocalRequest(remoteAddr) {
-			next.ServeHTTP(w, r)
+		if r.Header.Get("X-Forwarded-For") != "" {
+			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
 
-		if r.Header.Get("X-Forwarded-For") == "" {
+		// Verify connection
+		if isLocalRequest(r.RemoteAddr) {
 			next.ServeHTTP(w, r)
 			return
 		}

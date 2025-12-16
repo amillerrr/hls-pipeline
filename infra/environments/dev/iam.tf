@@ -213,7 +213,7 @@ resource "aws_iam_role_policy" "worker_s3_raw_read" {
         Effect = "Allow"
         Action = [
           "s3:GetObject",
-          "s3:HeadObject"  
+          "s3:HeadObject"
         ]
         Resource = "${aws_s3_bucket.raw_ingest.arn}/*"
       },
@@ -241,7 +241,7 @@ resource "aws_iam_role_policy" "worker_s3_processed_write" {
         Action = [
           "s3:PutObject",
           "s3:GetObject",
-          "s3:HeadObject",  
+          "s3:HeadObject",
           "s3:DeleteObject",
           "s3:ListBucket"
         ]

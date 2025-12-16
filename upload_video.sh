@@ -29,7 +29,7 @@ fi
 
 # Login
 echo "Authenticating..."
-LOGIN_RESPONSE=$(curl -s -k -X POST -u "$USERNAME:$PASSWORD" "$BASE_URL/login")
+LOGIN_RESPONSE=$(curl -s -X POST -u "$USERNAME:$PASSWORD" "$BASE_URL/login")
 TOKEN=$(echo "$LOGIN_RESPONSE" | jq -r '.token')
 
 if [ -z "$TOKEN" ] || [ "$TOKEN" == "null" ]; then
@@ -44,7 +44,7 @@ echo "Initializing Upload..."
 FILENAME=$(basename "$VIDEO_FILE")
 CONTENT_TYPE="video/mp4"
 
-INIT_RESPONSE=$(curl -s -k -X POST \
+INIT_RESPONSE=$(curl -s -X POST \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d "{\"filename\": \"$FILENAME\", \"contentType\": \"$CONTENT_TYPE\"}" \
@@ -75,7 +75,7 @@ echo "   Upload successful."
 
 # Complete Upload
 echo "Finalizing Job..."
-COMPLETE_RESPONSE=$(curl -s -k -w "%{http_code}" -o response.json -X POST \
+COMPLETE_RESPONSE=$(curl -s -w "%{http_code}" -o response.json -X POST \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d "{\"videoId\": \"$VIDEO_ID\", \"key\": \"$KEY\", \"filename\": \"$FILENAME\"}" \

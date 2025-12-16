@@ -2,7 +2,7 @@ resource "aws_sqs_queue" "video_queue" {
   name                       = "hls-video-queue-${var.environment}"
   delay_seconds              = 0
   max_message_size           = 262144
-  message_retention_seconds  = 86400   
+  message_retention_seconds  = 86400
   receive_wait_time_seconds  = 20
   visibility_timeout_seconds = 900
 
@@ -23,7 +23,7 @@ resource "aws_sqs_queue" "video_queue" {
 # Dead Letter Queue
 resource "aws_sqs_queue" "video_dlq" {
   name                      = "hls-video-dlq-${var.environment}"
-  message_retention_seconds = 1209600  # 14 days
+  message_retention_seconds = 1209600 # 14 days
 
   # FIXED: Added encryption
   sqs_managed_sse_enabled = true
@@ -111,7 +111,7 @@ resource "aws_cloudwatch_metric_alarm" "message_age" {
   namespace           = "AWS/SQS"
   period              = 300
   statistic           = "Maximum"
-  threshold           = 3600  # 1 hour
+  threshold           = 3600 # 1 hour
   alarm_description   = "Alert when oldest message is over 1 hour old"
   treat_missing_data  = "notBreaching"
 

@@ -11,7 +11,7 @@ resource "aws_ecr_repository" "api" {
   }
 
   tags = {
-    Name = "hls-api"
+    Name        = "hls-api"
     Application = "hls-pipeline"
   }
 }

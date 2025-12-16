@@ -1,10 +1,9 @@
-# Makefile
+# Makefile - HLS Pipeline (AWS)
 .PHONY: all deploy destroy env help
 
 # Configuration
 AWS_REGION ?= us-west-2
 TF_DIR = infra/environments/dev
-BOOTSTRAP_DIR = infra/bootstrap
 
 # ECR Configuration (populated after deploy)
 -include .env
@@ -121,7 +120,7 @@ ecs-deploy:
 ## lint: Run Go linters
 lint:
 	@echo "Running linters..."
-	@golangci-lint run ./... || true
+	@golangci-lint run ./...
 
 ## test: Run Go tests
 test:
@@ -136,29 +135,11 @@ clean:
 	@docker rmi hls-api:latest hls-worker:latest 2>/dev/null || true
 	@echo "Clean complete"
 
-# Local Development
-
-## local-up: Start local development environment
-local-up:
-	@echo "Starting local environment..."
-	@mkdir -p configs scripts/localstack-init
-	@test -f configs/prometheus-local.yaml || cp prometheus-local.yml configs/prometheus-local.yaml 2>/dev/null || echo "⚠️  Create configs/prometheus-local.yaml"
-	@test -f configs/otel-collector-local.yaml || echo "⚠️  Create configs/otel-collector-local.yaml"
-	@docker-compose -f docker-compose.local.yml up -d
-	@echo "Local environment started"
-	@echo "   API:        http://localhost:8080"
-	@echo "   Jaeger:     http://localhost:16686"
-	@echo "   Prometheus: http://localhost:9090"
-
-## local-down: Stop local development environment
-local-down:
-	@echo "Stopping local environment..."
-	@docker-compose -f docker-compose.local.yml down -v
-	@echo "Local environment stopped"
-
-## local-logs: View local container logs
-local-logs:
-	@docker-compose -f docker-compose.local.yml logs -f
+## tidy: Run go mod tidy
+tidy:
+	@echo "Tidying Go modules..."
+	@go mod tidy
+	@echo "Done"
 
 # Utility Targets 
 
@@ -196,12 +177,8 @@ help:
 	@echo "Development:"
 	@echo "  lint          Run Go linters"
 	@echo "  test          Run Go tests"
+	@echo "  tidy          Run go mod tidy"
 	@echo "  clean         Clean build artifacts"
-	@echo ""
-	@echo "Local Development:"
-	@echo "  local-up      Start local development environment"
-	@echo "  local-down    Stop local development environment"
-	@echo "  local-logs    View local container logs"
 	@echo ""
 	@echo "Utilities:"
 	@echo "  upload-test   Upload a test video"

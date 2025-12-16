@@ -59,7 +59,11 @@ resource "aws_s3_bucket_lifecycle_configuration" "raw_ingest_lifecycle" {
     }
 
     expiration {
-      days = 1  # Delete after 1 day
+      days = 1 # Delete after 1 day
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = 1
     }
   }
 }

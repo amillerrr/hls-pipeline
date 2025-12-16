@@ -32,19 +32,17 @@ func InitTracer(ctx context.Context, serviceName string) func(context.Context) e
 	)
 	if err != nil {
 		slog.Error("Failed to create trace exporter", "error", err)
-		os.Exit(1)
 	}
 
 	// Create the Resource
 	res, err := resource.New(ctx,
 		resource.WithAttributes(
 			semconv.ServiceName(serviceName),
-			semconv.DeploymentEnvironment("dev"),
+			semconv.DeploymentEnvironment(getEnvironment()),
 		),
 	)
 	if err != nil {
 		slog.Error("Failed to create trace resource", "error", err)
-		os.Exit(1)
 	}
 
 	// Register the Trace Provider
@@ -59,4 +57,13 @@ func InitTracer(ctx context.Context, serviceName string) func(context.Context) e
 	slog.Info("OpenTelemetry Tracer initialized", "service", serviceName)
 
 	return tp.Shutdown
+}
+
+// Return the current deployment environment
+func getEnvironment() string {
+	env := os.Getenv("ENV")
+	if env == "" {
+		return "dev"
+	}
+	return env
 }
