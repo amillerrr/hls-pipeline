@@ -10,6 +10,7 @@ locals {
 
 # ALB certificate 
 resource "aws_acm_certificate" "alb_cert" {
+  provider          = aws.us_east_1
   domain_name       = local.api_domain
   validation_method = "DNS"
 
@@ -47,7 +48,6 @@ resource "aws_acm_certificate" "cdn_cert" {
 }
 
 resource "aws_route53_record" "cdn_cert_val" {
-  provider = aws.us_east_1
   for_each = {
     for dvo in aws_acm_certificate.cdn_cert.domain_validation_options : dvo.domain_name => dvo
   }

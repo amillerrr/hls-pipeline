@@ -63,12 +63,12 @@ echo "   Video ID: $VIDEO_ID"
 
 # Direct S3 Upload
 echo "Uploading to S3 (Direct)..."
-curl -s -S -X PUT -T "$VIDEO_FILE" \
+HTTP_CODE=$(curl -s -S -w "%{http_code}" -o /dev/null -X PUT -T "$VIDEO_FILE" \
   -H "Content-Type: $CONTENT_TYPE" \
-  "$UPLOAD_URL"
+  "$UPLOAD_URL")
 
-if [ $? -ne 0 ]; then
-    echo "Upload failed."
+if [ "$HTTP_CODE" -ne 200 ]; then
+    echo "Upload failed with HTTP $HTTP_CODE"
     exit 1
 fi
 echo "   Upload successful."

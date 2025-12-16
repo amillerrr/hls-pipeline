@@ -25,7 +25,21 @@
 
   <script>
     var video = document.getElementById('video');
-    var apiEndpoint = 'https://api.video.miller.today/latest'
+    var apiEndpoint = (function() {
+      var params = new URLSearchParams(window.location.search);
+      if (params.get('api')) {
+        return params.get('api');
+      }
+      
+      var hostname = window.location.hostname;
+      if (hostname && hostname !== 'localhost' && hostname !== '127.0.0.1') {
+        // Assumes API is at api.{subdomain}.{domain}
+        var parts = hostname.split('.');
+        if (parts.length >= 2) {
+          return 'https://api.' + hostname + '/latest';
+        }
+      }
+    })();
 
     function logError(msg) {
         var d = document.createElement('div');
