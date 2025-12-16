@@ -64,7 +64,7 @@ const (
 )
 
 // Video encoding parameters
-type QualityPreset = struct {
+type QualityPreset struct {
 	Name     string
 	Width    int
 	Height   int

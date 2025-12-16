@@ -117,7 +117,7 @@ func (a *API) writeError(ctx context.Context, w http.ResponseWriter, status int,
 }
 
 // Wrap the request body with a size limit
-func (a *API) limitedBodyReader(w http.ResponseWriter, r *http.Request) {
+func (a *API) limitRequestBody(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodySize)
 }
 
@@ -263,7 +263,7 @@ func (a *API) InitUploadHandler(w http.ResponseWriter, r *http.Request) {
 			))
 	defer span.End()
 
-	a.limitedBodyReader(w, r)
+	a.limitRequestBody(w, r)
 
 	var req InitUploadRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -360,7 +360,7 @@ func (a *API) CompleteUploadHandler(w http.ResponseWriter, r *http.Request) {
 		))
 	defer span.End()
 
-	a.limitedBodyReader(w, r)
+	a.limitRequestBody(w, r)
 
 	var req CompleteUploadRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

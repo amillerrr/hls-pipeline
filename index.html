@@ -21,6 +21,7 @@
     <div id="stat_bitrate">Bitrate: Loading...</div>
     <div id="stat_res">Resolution: Loading...</div>
   </div>
+  <div id="errors"></div>
 
   <script>
     var video = document.getElementById('video');
@@ -79,6 +80,7 @@
       })
       .catch(err => {
         console.error("API Error:", err);
+        logError("API Error: " + err.message);
       });
   </script>
 </body>

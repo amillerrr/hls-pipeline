@@ -1,5 +1,5 @@
 # Makefile
-.PHONY: all deploy destroy env
+.PHONY: all deploy destroy env help
 
 # Configuration
 AWS_REGION ?= us-west-2
@@ -14,7 +14,7 @@ ECR_WORKER_URL ?= $(shell terraform -chdir=$(TF_DIR) output -raw worker_reposito
 # Default target
 all: help
 
-# Create S3 state bucket and DynamoDB lock table 
+## bootstrap: Create S3 state bucket and DynamoDB lock table
 bootstrap:
 	@echo "Creating Terraform state infrastructure..."
 	@aws s3api create-bucket \
@@ -35,7 +35,7 @@ bootstrap:
 		--region $(AWS_REGION) 2>/dev/null || true
 	@echo "Bootstrap complete"
 
-# Initialize Terraform
+## init: Initialize Terraform
 init:
 	@echo "Initializing Terraform..."
 	@terraform -chdir=$(TF_DIR) init
@@ -45,7 +45,7 @@ plan: init
 	@echo "Planning infrastructure changes..."
 	@terraform -chdir=$(TF_DIR) plan
 
-# Deploy Infrastructure
+## deploy: Deploy infrastructure with Terraform
 deploy: init
 	@echo "Deploying infrastructure..."
 	@terraform -chdir=$(TF_DIR) apply -auto-approve
@@ -53,14 +53,14 @@ deploy: init
 	@echo ""
 	@echo "Deployment Complete."
 
-# Destroy Infrastructure
+## destroy: Destroy all infrastructure
 destroy:
 	@echo "Destroying Infrastructure..."
 	@terraform -chdir=$(TF_DIR) destroy -auto-approve
 	@rm -f .env
 	@echo "Infrastructure Destroyed."
 
-# Generate .env file from Terraform outputs
+## env: Generate .env file from Terraform outputs
 env:
 	@echo "Generating .env file..."
 	@terraform -chdir=$(TF_DIR) output -json 2>/dev/null \
@@ -68,32 +68,32 @@ env:
 	@echo "AWS_REGION=$(AWS_REGION)" >> .env
 	@echo ".env file created"
 
-# Show Terraform outputs
+## outputs: Show Terraform outputs
 outputs:
 	@terraform -chdir=$(TF_DIR) output
 
 
 # Build Targets
 
-# Build Docker images locally
+## build: Build all Docker images locally
 build: build-api build-worker
 
-# Build API Docker image
+## build-api: Build API Docker image
 build-api:
 	@echo "Building API image..."
 	@docker build -t hls-api:latest -f Dockerfile .
 	@echo "API image built"
 
-# Build Worker Docker image
+## build-worker: Build Worker Docker image
 build-worker:
 	@echo "Building Worker image..."
 	@docker build -t hls-worker:latest -f Dockerfile.worker .
 	@echo "Worker image built"
 
-# Push images to ECR
+## push: Push all images to ECR
 push: push-api push-worker
 
-# Push API image to ECR
+## push-api: Push API image to ECR
 push-api:
 	@echo "Pushing API image to ECR..."
 	@aws ecr get-login-password --region $(AWS_REGION) | docker login --username AWS --password-stdin $(ECR_API_URL)
@@ -101,7 +101,7 @@ push-api:
 	@docker push $(ECR_API_URL):latest
 	@echo "API image pushed"
 
-# Push Worker image to ECR
+## push-worker: Push Worker image to ECR
 push-worker:
 	@echo "Pushing Worker image to ECR..."
 	@aws ecr get-login-password --region $(AWS_REGION) | docker login --username AWS --password-stdin $(ECR_WORKER_URL)
@@ -109,7 +109,7 @@ push-worker:
 	@docker push $(ECR_WORKER_URL):latest
 	@echo "Worker image pushed"
 
-# Force new ECS deployment 
+## ecs-deploy: Force new ECS deployment
 ecs-deploy:
 	@echo "Forcing ECS service update..."
 	@aws ecs update-service --cluster hls-cluster --service hls-api-svc --force-new-deployment --region $(AWS_REGION) > /dev/null
@@ -117,17 +117,18 @@ ecs-deploy:
 	@echo "ECS services updating."
 
 # Development Targets
-# Run Go linters
+
+## lint: Run Go linters
 lint:
 	@echo "Running linters..."
 	@golangci-lint run ./... || true
 
-# Run Go tests
+## test: Run Go tests
 test:
 	@echo "Running tests..."
 	@go test -v -race -coverprofile=coverage.out ./...
 
-# Clean build artifacts
+## clean: Clean build artifacts
 clean:
 	@echo "Cleaning..."
 	@rm -f .env coverage.out
@@ -137,7 +138,7 @@ clean:
 
 # Local Development
 
-# Start local development environment
+## local-up: Start local development environment
 local-up:
 	@echo "Starting local environment..."
 	@mkdir -p configs scripts/localstack-init
@@ -149,43 +150,61 @@ local-up:
 	@echo "   Jaeger:     http://localhost:16686"
 	@echo "   Prometheus: http://localhost:9090"
 
-# Stop local development environment
+## local-down: Stop local development environment
 local-down:
 	@echo "Stopping local environment..."
 	@docker-compose -f docker-compose.local.yml down -v
 	@echo "Local environment stopped"
 
-# View local container logs
+## local-logs: View local container logs
 local-logs:
 	@docker-compose -f docker-compose.local.yml logs -f
 
 # Utility Targets 
 
-# Upload a test video (requires test_assets/tempest_input.mp4)
+## upload-test: Upload a test video (requires test_assets/tempest_input.mp4)
 upload-test:
 	@./upload_video.sh
 
-# Run stress test against API
+## stress-test: Run stress test against API
 stress-test:
 	@./stress_test.sh
 
-# Show this help
+## help: Show this help message
 help:
 	@echo ""
 	@echo "Usage: make [target]"
 	@echo ""
 	@echo "Infrastructure:"
-	@grep -E '^## ' $(MAKEFILE_LIST) | grep -E '(bootstrap|init|plan|deploy|destroy|env|outputs):' | sed 's/## /  /' | column -t -s ':'
+	@echo "  bootstrap     Create S3 state bucket and DynamoDB lock table"
+	@echo "  init          Initialize Terraform"
+	@echo "  plan          Show Terraform execution plan"
+	@echo "  deploy        Deploy infrastructure with Terraform"
+	@echo "  destroy       Destroy all infrastructure"
+	@echo "  env           Generate .env file from Terraform outputs"
+	@echo "  outputs       Show Terraform outputs"
 	@echo ""
 	@echo "Build & Deploy:"
-	@grep -E '^## ' $(MAKEFILE_LIST) | grep -E '(build|push|ecs-deploy):' | sed 's/## /  /' | column -t -s ':'
+	@echo "  build         Build all Docker images locally"
+	@echo "  build-api     Build API Docker image"
+	@echo "  build-worker  Build Worker Docker image"
+	@echo "  push          Push all images to ECR"
+	@echo "  push-api      Push API image to ECR"
+	@echo "  push-worker   Push Worker image to ECR"
+	@echo "  ecs-deploy    Force new ECS deployment"
 	@echo ""
 	@echo "Development:"
-	@grep -E '^## ' $(MAKEFILE_LIST) | grep -E '(lint|test|clean):' | sed 's/## /  /' | column -t -s ':'
+	@echo "  lint          Run Go linters"
+	@echo "  test          Run Go tests"
+	@echo "  clean         Clean build artifacts"
 	@echo ""
-	@echo "Local Dev (Optional):"
-	@grep -E '^## ' $(MAKEFILE_LIST) | grep -E 'local-' | sed 's/## /  /' | column -t -s ':'
+	@echo "Local Development:"
+	@echo "  local-up      Start local development environment"
+	@echo "  local-down    Stop local development environment"
+	@echo "  local-logs    View local container logs"
 	@echo ""
 	@echo "Utilities:"
-	@grep -E '^## ' $(MAKEFILE_LIST) | grep -E '(upload-test|stress-test|oidc-setup|help):' | sed 's/## /  /' | column -t -s ':'
+	@echo "  upload-test   Upload a test video"
+	@echo "  stress-test   Run stress test against API"
+	@echo "  help          Show this help message"
 	@echo ""

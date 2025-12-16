@@ -133,7 +133,7 @@ resource "aws_lb_listener_rule" "block_metrics" {
 # Forward all other traffic to API
 resource "aws_lb_listener_rule" "api_forward" {
   listener_arn = aws_lb_listener.https.arn
-  priority     = 100
+  priority     = 2
 
   action {
     type             = "forward"

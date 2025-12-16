@@ -1,7 +1,8 @@
 locals {
   otel_collector_image = "public.ecr.aws/aws-observability/aws-otel-collector:v0.46.0"
 
-  base_otel = {
+  # API-specific OTEL config
+  api_otel_config = {
     receivers = {
       otlp = {
         protocols = {
@@ -11,18 +12,11 @@ locals {
       }
       prometheus = {
         config = {
-          scrape_configs = [
-            {
-              job_name        = "hls-api"
-              scrape_interval = "10s"
-              static_configs  = [{ targets = ["localhost:8080"] }]
-            },
-            {
-              job_name        = "hls-worker"
-              scrape_interval = "10s"
-              static_configs  = [{ targets = ["localhost:2112"] }]
-            }
-          ]
+          scrape_configs = [{
+            job_name        = "hls-api"
+            scrape_interval = "10s"
+            static_configs  = [{ targets = ["localhost:8080"] }]
+          }]
         }
       }
     }
@@ -41,21 +35,16 @@ locals {
       }
     }
   }
-  api_otel_config = merge(local.base_otel, {
-    receivers = merge(local.base_otel.receivers, {
-      prometheus = {
-        config = {
-          scrape_configs = [{
-            job_name        = "hls-api"
-            scrape_interval = "10s"
-            static_configs  = [{ targets = ["localhost:8080"] }]
-          }]
+
+  # Worker-specific OTEL config
+  worker_otel_config = {
+    receivers = {
+      otlp = {
+        protocols = {
+          grpc = { endpoint = "0.0.0.0:4317" }
+          http = { endpoint = "0.0.0.0:4318" }
         }
       }
-    })
-  })
-  worker_otel_config = merge(local.base_otel, {
-    receivers = merge(local.base_otel.receivers, {
       prometheus = {
         config = {
           scrape_configs = [{
@@ -65,8 +54,22 @@ locals {
           }]
         }
       }
-    })
-  })
+    }
+    exporters = {
+      awsxray = { region = var.aws_region }
+      awsemf = {
+        region                  = var.aws_region
+        namespace               = "HLSPipeline"
+        dimension_rollup_option = "NoDimensionRollup"
+      }
+    }
+    service = {
+      pipelines = {
+        traces  = { receivers = ["otlp"], exporters = ["awsxray"] }
+        metrics = { receivers = ["prometheus"], exporters = ["awsemf"] }
+      }
+    }
+  }
 }
 
 # Secrets Manager for sensitive configuration

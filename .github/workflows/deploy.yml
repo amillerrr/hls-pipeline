@@ -188,10 +188,26 @@ jobs:
           severity: 'CRITICAL,HIGH'
         continue-on-error: true
 
-      - name: Upload Trivy scan results
+      - name: Upload API Trivy scan results
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: 'trivy-api-results.sarif'
+        if: always()
+        continue-on-error: true
+
+      - name: Scan Worker Image
+        uses: aquasecurity/trivy-action@v0.33.1
+        with:
+          image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY_WORKER }}:${{ github.sha }}
+          format: 'sarif'
+          output: 'trivy-worker-results.sarif'
+          severity: 'CRITICAL,HIGH'
+        continue-on-error: true
+
+      - name: Upload Worker Trivy scan results
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: 'trivy-worker-results.sarif'
         if: always()
         continue-on-error: true
 
