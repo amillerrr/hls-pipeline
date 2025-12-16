@@ -40,6 +40,7 @@ const (
 	TracerShutdownTimeout = 5 * time.Second
 	AWSConfigTimeout      = 10 * time.Second
 	HealthCheckTimeout    = 5 * time.Second
+	DeepHealthRateLimit   = 10 * time.Second
 )
 
 // HealthChecker provides health check functionality
@@ -53,6 +54,7 @@ type HealthChecker struct {
 	lastCheck   time.Time
 	lastStatus  *HealthStatus
 	cacheTTL    time.Duration
+	lastDeepCheck time.Time
 }
 
 // HealthStatus represents the health check response
@@ -126,6 +128,20 @@ func (h *HealthChecker) Check(ctx context.Context, deep bool) *HealthStatus {
 	h.mu.Unlock()
 
 	return status
+}
+
+// Check if enough time has passed since the last deep check
+func (h *HealthChecker) CanPerformDeepCheck() bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return time.Since(h.lastDeepCheck) >= DeepHealthRateLimit
+}
+
+// Record the time of a deep health check
+func (h *HealthChecker) RecordDeepCheck() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.lastDeepCheck = time.Now()
 }
 
 func (h *HealthChecker) checkS3(ctx context.Context) ComponentCheck {
@@ -236,7 +252,7 @@ func main() {
 
 	// Public endpoints
 	mux.HandleFunc("/health", healthHandler(healthChecker))
-	mux.HandleFunc("/health/deep", deepHealthHandler(healthChecker))
+	mux.HandleFunc("/health/deep", deepHealthHandler(healthChecker, log))
 	mux.HandleFunc("/login", api.LoginHandler)
 	mux.HandleFunc("/latest", api.GetLatestVideoHandler)
 
@@ -311,8 +327,28 @@ func healthHandler(checker *HealthChecker) http.HandlerFunc {
 }
 
 // Return a detailed health check with dependency status
-func deepHealthHandler(checker *HealthChecker) http.HandlerFunc {
+func deepHealthHandler(checker *HealthChecker, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if !checker.CanPerformDeepCheck() {
+			// Return cached result if rate limited
+			status := checker.Check(r.Context(), false)
+			status.Checks["rate_limited"] = ComponentCheck{
+				Status: "info",
+				Error:  "Deep health check rate limited, returning cached result",
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Retry-After", "10")
+			w.WriteHeader(http.StatusTooManyRequests)
+
+			if err := json.NewEncoder(w).Encode(status); err != nil {
+				logger.Error(r.Context(), log, "Failed to encode health check response", "error", err)
+			}
+			return
+		}
+
+		checker.RecordDeepCheck()
+
 		status := checker.Check(r.Context(), true)
 
 		w.Header().Set("Content-Type", "application/json")
@@ -323,9 +359,8 @@ func deepHealthHandler(checker *HealthChecker) http.HandlerFunc {
 		}
 
 		if err := json.NewEncoder(w).Encode(status); err != nil {
-			logger.Error(r.Context(), slog.Default(), "Failed to encode health check response", "error", err)
-		}
-	}
+			logger.Error(r.Context(), log, "Failed to encode health check response", "error", err)
+		}	}
 }
 
 // Restrict access to localhost
