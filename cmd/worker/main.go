@@ -63,8 +63,8 @@ const (
 	MaxConcurrentUploads = 20
 )
 
-// Video quality presets
-var qualityPresets = []struct {
+// Video encoding parameters
+type QualityPreset = struct {
 	Name     string
 	Width    int
 	Height   int
@@ -73,7 +73,10 @@ var qualityPresets = []struct {
 	BufSize  string
 	AudioBPS string
 	Bandwidth int
-}{
+}
+
+// Video quality presets for FFmpeg
+var qualityPresets = []QualityPreset{
 	{"1080p", 1920, 1080, "5M", "5.5M", "7.5M", "192k", 5500000},
 	{"720p", 1280, 720, "2.5M", "2.75M", "5M", "128k", 2750000},
 	{"480p", 854, 480, "1M", "1.1M", "2M", "96k", 1100000},
@@ -154,6 +157,7 @@ type Worker struct {
 	processedBucket string
 	log             *slog.Logger
 	maxConcurrent   int
+	metricsServer   *http.Server
 }
 
 type VideoJob struct {
@@ -247,6 +251,15 @@ func main() {
 
 	// Start polling
 	worker.pollQueue(ctx)
+
+	// Shutdown metrics server gracefully
+	if worker.metricsServer != nil {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), ShutdownTimeout)
+		defer shutdownCancel()
+		if err := worker.metricsServer.Shutdown(shutdownCtx); err != nil {
+			logger.Error(context.Background(), log, "Failed to shutdown metrics server", "error", err)
+		}
+	}
 }
 
 func (w *Worker) validateConfig() error {
@@ -272,14 +285,14 @@ func (w *Worker) startMetricsServer() {
 		}
 	})
 
-	server := &http.Server{
+	w.metricsServer = &http.Server{
 		Addr:              fmt.Sprintf(":%d", MetricsPort),
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	logger.Info(context.Background(), w.log, "Starting metrics server", "port", MetricsPort)
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := w.metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Error(context.Background(), w.log, "Metrics server error", "error", err)
 	}
 }
@@ -373,9 +386,14 @@ func (w *Worker) processMessage(ctx context.Context, msg types.Message) error {
 	span.SetAttributes(
 		attribute.String("video.id", job.VideoID),
 		attribute.String("video.s3_key", job.S3Key),
+		attribute.String("video.filename", job.Filename),
 	)
 
-	logger.Info(ctx, w.log, "Processing video", "videoId", job.VideoID, "s3Key", job.S3Key)
+	logger.Info(ctx, w.log, "Processing video", 
+		"videoId", job.VideoID,
+		"s3Key", job.S3Key,
+		"filename", job.Filename,
+	)
 
 	start := time.Now()
 
@@ -425,6 +443,7 @@ func (w *Worker) processMessage(ctx context.Context, msg types.Message) error {
 
 	logger.Info(ctx, w.log, "Video processed successfully",
 		"videoId", job.VideoID,
+		"filename", job.Filename,
 		"durationSeconds", duration,
 	)
 
@@ -516,6 +535,35 @@ func (w *Worker) transcodeToHLS(ctx context.Context, videoID string, inputPath s
 	return hlsDir, nil
 }
 
+// Generate the FFmpeg filter_complex string
+func buildFilterComplex(presets []QualityPreset) string {
+	n := len(presets)
+	if n == 0 {
+		return ""
+	}
+
+	// Build split outputs: [v1][v2][v3]...
+	var splitOutputs strings.Builder
+	for i := 1; i <= n; i++ {
+		splitOutputs.WriteString(fmt.Sprintf("[v%d]", i))
+	}
+
+	// Build the complete filter complex
+	var filter strings.Builder
+	filter.WriteString(fmt.Sprintf("[0:v]split=%d%s;", n, splitOutputs.String()))
+
+	// Build scale filters for each preset
+	for i, preset := range presets {
+		filter.WriteString(fmt.Sprintf("[v%d]scale=%d:%d[v%dout]",
+			i+1, preset.Width, preset.Height, i+1))
+		if i < n-1 {
+			filter.WriteString(";")
+		}
+	}
+
+	return filter.String()
+}
+
 func (w *Worker) runFFmpeg(ctx context.Context, inputPath, hlsDir string) error {
 	ctx, span := tracer.Start(ctx, "ffmpeg-transcode")
 	defer span.End()
@@ -531,15 +579,7 @@ func (w *Worker) runFFmpeg(ctx context.Context, inputPath, hlsDir string) error 
 		"-keyint_min", "100",
 		"-sc_threshold", "0",
 		"-flags", "+cgop",
-		"-filter_complex",
-		fmt.Sprintf("[0:v]split=%d[v1][v2][v3];"+
-			"[v1]scale=%d:%d[v1out];"+
-			"[v2]scale=%d:%d[v2out];"+
-			"[v3]scale=%d:%d[v3out]",
-			len(qualityPresets),
-			qualityPresets[0].Width, qualityPresets[0].Height,
-			qualityPresets[1].Width, qualityPresets[1].Height,
-			qualityPresets[2].Width, qualityPresets[2].Height),
+		"-filter_complex", buildFilterComplex(qualityPresets),
 	}
 
 	// Add output streams for each quality preset

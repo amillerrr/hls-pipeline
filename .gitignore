@@ -4,6 +4,7 @@
 *.tfstate.backup
 .terraform.lock.hcl
 *.tfvars
+!*.tfvars.example
 
 # Secrets
 .env
@@ -13,6 +14,9 @@
 # Video Assets
 test_assets/
 tmp/
+
+# Build artifacts
+coverage.out
 
 # OS specific
 .DS_Store

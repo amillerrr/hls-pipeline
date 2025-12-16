@@ -60,6 +60,7 @@ var (
 	ErrFilenameTooLong    = errors.New("filename too long")
 	ErrInvalidContentType = errors.New("invalid content type")
 	ErrVideoNotFound      = errors.New("video not found")
+	ErrInvalidKeyFormat   = errors.New("invalid key format")
 )
 
 type API struct {
@@ -148,6 +149,28 @@ func validateContentType(contentType string) error {
 	return nil
 }
 
+// Ensure the key matches expected format and contains allowed extension
+func validateS3Key(key, videoID string) error {
+	// Key must start with "uploads/{videoID}"
+	expectedPrefix := fmt.Sprintf("uploads/%s", videoID)
+	if !strings.HasPrefix(key, expectedPrefix) {
+		return fmt.Errorf("%w: key must start with %s", ErrInvalidKeyFormat, expectedPrefix)
+	}
+
+	// Key must have an allowed extension
+	ext := strings.ToLower(filepath.Ext(key))
+	if !AllowedExtensions[ext] {
+		return fmt.Errorf("%w: invalid extension in key", ErrInvalidKeyFormat)
+	}
+
+	// Prevent path traversal
+	if strings.Contains(key, "..") {
+		return fmt.Errorf("%w: path traversal not allowed", ErrInvalidKeyFormat)
+	}
+
+	return nil
+}
+
 // Handle user authentication and return JWT token
 func (a *API) LoginHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -220,6 +243,7 @@ type InitUploadResponse struct {
 	UploadURL string `json:"uploadUrl"`
 	VideoID   string `json:"videoId"`
 	Key       string `json:"key"`
+	RequestID string `json:"requestId"`
 }
 
 // Generate Presigned URL
@@ -231,8 +255,12 @@ func (a *API) InitUploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	requestID := uuid.New().String()
 	ctx, span := tracer.Start(ctx, "init-upload-handler",
-		trace.WithAttributes(attribute.String("handler", "init-upload")))
+		trace.WithAttributes(
+			attribute.String("handler", "init-upload"),
+			attribute.String("request.id", requestID),
+			))
 	defer span.End()
 
 	a.limitedBodyReader(w, r)
@@ -280,7 +308,7 @@ func (a *API) InitUploadHandler(w http.ResponseWriter, r *http.Request) {
 	url, err := a.s3Client.GeneratePresignedURL(ctx, bucket, s3Key, req.ContentType, PresignedURLExpiration)
 	if err != nil {
 		span.RecordError(err)
-		logger.Error(ctx, a.log, "Failed to generate presigned URL", "error", err, "videoId", videoID)
+		logger.Error(ctx, a.log, "Failed to generate presigned URL", "error", err, "videoId", videoID, "requestId", requestID)
 		a.writeError(ctx, w, http.StatusInternalServerError, "Internal server error")
 		return
 	}
@@ -289,12 +317,14 @@ func (a *API) InitUploadHandler(w http.ResponseWriter, r *http.Request) {
 		"videoId", videoID,
 		"key", s3Key,
 		"filename", req.Filename,
+		"requestId", requestID,
 	)
 
 	a.writeJSON(ctx, w, http.StatusOK, InitUploadResponse{
 		UploadURL: url,
 		VideoID:   videoID,
 		Key:       s3Key,
+		RequestID: requestID,
 	})
 }
 
@@ -310,6 +340,7 @@ type CompleteUploadResponse struct {
 	VideoID string `json:"videoId"`
 	Status  string `json:"status"`
 	Message string `json:"message"`
+	RequestID string `json:"requestId"`
 }
 
 // Verify the upload and queue the processing job
@@ -321,8 +352,12 @@ func (a *API) CompleteUploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	requestID := uuid.New().String()
 	ctx, span := tracer.Start(ctx, "complete-upload-handler",
-		trace.WithAttributes(attribute.String("handler", "complete-upload")))
+		trace.WithAttributes(
+			attribute.String("handler", "complete-upload"),
+			attribute.String("request.id", requestID),
+		))
 	defer span.End()
 
 	a.limitedBodyReader(w, r)
@@ -331,10 +366,10 @@ func (a *API) CompleteUploadHandler(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		span.RecordError(err)
 		var maxBytesErr *http.MaxBytesError
-    if errors.As(err, &maxBytesErr) {
-        a.writeError(ctx, w, http.StatusRequestEntityTooLarge, "Request body too large")
-        return
-    }
+		if errors.As(err, &maxBytesErr) {
+			a.writeError(ctx, w, http.StatusRequestEntityTooLarge, "Request body too large")
+			return
+		}
 		a.writeError(ctx, w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -346,6 +381,19 @@ func (a *API) CompleteUploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Key == "" {
 		a.writeError(ctx, w, http.StatusBadRequest, "key is required")
+		return
+	}
+
+	// Validate S3 key format to prevent unauthorized access
+	if err := validateS3Key(req.Key, req.VideoID); err != nil {
+		span.RecordError(err)
+		logger.Warn(ctx, a.log, "Invalid S3 key format",
+			"key", req.Key,
+			"videoId", req.VideoID,
+			"requestId", requestID,
+			"error", err,
+		)
+		a.writeError(ctx, w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -366,6 +414,7 @@ func (a *API) CompleteUploadHandler(w http.ResponseWriter, r *http.Request) {
 		logger.Warn(ctx, a.log, "File not found in S3 during completion",
 			"key", req.Key,
 			"videoId", req.VideoID,
+			"requestId", requestID,
 			"error", err,
 		)
 		a.writeError(ctx, w, http.StatusNotFound, "Video file not found in S3")
@@ -378,6 +427,7 @@ func (a *API) CompleteUploadHandler(w http.ResponseWriter, r *http.Request) {
 		logger.Info(ctx, a.log, "Upload verified",
 			"videoId", req.VideoID,
 			"sizeBytes", *headResult.ContentLength,
+			"requestId", requestID,
 		)
 	}
 
@@ -392,7 +442,7 @@ func (a *API) CompleteUploadHandler(w http.ResponseWriter, r *http.Request) {
 	messageBytes, err := json.Marshal(message)
 	if err != nil {
 		span.RecordError(err)
-		logger.Error(ctx, a.log, "Failed to marshal message", "error", err, "videoId", req.VideoID)
+		logger.Error(ctx, a.log, "Failed to marshal message", "error", err, "videoId", req.VideoID, "requestId", requestID)
 		a.writeError(ctx, w, http.StatusInternalServerError, "Internal server error")
 		return
 	}
@@ -406,17 +456,19 @@ func (a *API) CompleteUploadHandler(w http.ResponseWriter, r *http.Request) {
 		logger.Error(ctx, a.log, "Failed to queue processing job",
 			"error", err,
 			"videoId", req.VideoID,
+			"requestId", requestID,
 		)
 		a.writeError(ctx, w, http.StatusInternalServerError, "Failed to queue job")
 		return
 	}
 
-	logger.Info(ctx, a.log, "Processing job queued", "videoId", req.VideoID)
+	logger.Info(ctx, a.log, "Processing job queued", "videoId", req.VideoID, "requestId", requestID)
 
 	a.writeJSON(ctx, w, http.StatusAccepted, CompleteUploadResponse{
 		VideoID: req.VideoID,
 		Status:  "processing",
 		Message: "Video queued for processing",
+		RequestID: requestID,
 	})
 }
 
