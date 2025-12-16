@@ -30,6 +30,10 @@ resource "aws_cloudfront_response_headers_policy" "security_headers" {
       preload                    = true
       override                   = true
     }
+    content_security_policy {
+      content_security_policy = "default-src 'self'; script-src 'self' cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'"
+      override = true
+    }
   }
 }
 

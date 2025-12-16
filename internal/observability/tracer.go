@@ -2,6 +2,7 @@ package observability
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -16,7 +17,7 @@ import (
 )
 
 // Create a new trace provider instance
-func InitTracer(ctx context.Context, serviceName string) func(context.Context) error {
+func InitTracer(ctx context.Context, serviceName string) (func(context.Context) error, error) {
 	endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
 	if endpoint == "" {
 		endpoint = "localhost:4317"
@@ -31,7 +32,7 @@ func InitTracer(ctx context.Context, serviceName string) func(context.Context) e
 		otlptracegrpc.WithEndpoint(endpoint),
 	)
 	if err != nil {
-		slog.Error("Failed to create trace exporter", "error", err)
+		return nil, fmt.Errorf("failed to create trace exporter: %w", err)
 	}
 
 	// Create the Resource
@@ -42,7 +43,7 @@ func InitTracer(ctx context.Context, serviceName string) func(context.Context) e
 		),
 	)
 	if err != nil {
-		slog.Error("Failed to create trace resource", "error", err)
+		return nil, fmt.Errorf("failed to create trace resource: %w", err)
 	}
 
 	// Register the Trace Provider
@@ -56,7 +57,7 @@ func InitTracer(ctx context.Context, serviceName string) func(context.Context) e
 
 	slog.Info("OpenTelemetry Tracer initialized", "service", serviceName)
 
-	return tp.Shutdown
+	return tp.Shutdown, nil
 }
 
 // Return the current deployment environment

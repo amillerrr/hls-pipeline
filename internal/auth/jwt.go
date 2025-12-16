@@ -44,6 +44,7 @@ type rateLimiter struct {
 	attempts map[string]*attemptInfo
 	stopCh   chan struct{}
 	stopped  bool
+	stopOnce sync.Once
 }
 
 type attemptInfo struct {
@@ -106,12 +107,9 @@ func (rl *rateLimiter) cleanup() {
 
 // Stop the rate limiter cleanup goroutine
 func (rl *rateLimiter) Stop() {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	if !rl.stopped {
+	rl.stopOnce.Do(func() {
 		close(rl.stopCh)
-		rl.stopped = true
-	}
+	})
 }
 
 // Stop the background cleanup goroutine (for graceful shutdown)

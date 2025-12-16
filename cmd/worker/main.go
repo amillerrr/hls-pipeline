@@ -65,13 +65,13 @@ const (
 
 // Video encoding parameters
 type QualityPreset struct {
-	Name     string
-	Width    int
-	Height   int
-	Bitrate  string
-	MaxRate  string
-	BufSize  string
-	AudioBPS string
+	Name      string
+	Width     int
+	Height    int
+	Bitrate   string
+	MaxRate   string
+	BufSize   string
+	AudioBPS  string
 	Bandwidth int
 }
 
@@ -190,7 +190,11 @@ func main() {
 	}
 
 	// Initialize tracing
-	shutdownTracer := observability.InitTracer(context.Background(), "hls-worker")
+	shutdownTracer, err := observability.InitTracer(context.Background(), "hls-worker")
+	if err != nil {
+		logger.Error(context.Background(), log, "Failed to initialize tracer", "error", err)
+		os.Exit(1)
+	}
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), ShutdownTimeout)
 		defer cancel()
@@ -389,7 +393,7 @@ func (w *Worker) processMessage(ctx context.Context, msg types.Message) error {
 		attribute.String("video.filename", job.Filename),
 	)
 
-	logger.Info(ctx, w.log, "Processing video", 
+	logger.Info(ctx, w.log, "Processing video",
 		"videoId", job.VideoID,
 		"s3Key", job.S3Key,
 		"filename", job.Filename,
@@ -825,7 +829,7 @@ func (w *Worker) uploadHLSFiles(ctx context.Context, videoID, hlsDir string) err
 			// Update Metrics Atomically
 			filesUploaded.Add(1)
 			totalBytes.Add(fileInfo.Size())
-			
+
 			// Use Debug level to reduce log noise
 			logger.Debug(ctx, w.log, "Uploaded file", "key", s3Key)
 

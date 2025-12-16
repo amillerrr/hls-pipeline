@@ -205,7 +205,11 @@ func main() {
 		logger.Info(context.Background(), log, "No .env file found, relying on system ENV variables")
 	}
 
-	shutdownTracer := observability.InitTracer(context.Background(), "hls-api")
+	shutdownTracer, err := observability.InitTracer(context.Background(), "hls-api")
+	if err != nil {
+		logger.Error(context.Background(), log, "Failed to initialize tracer", "error", err)
+		os.Exit(1)
+	}
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), TracerShutdownTimeout)
 		defer cancel()
@@ -261,7 +265,7 @@ func main() {
 	mux.HandleFunc("/upload/complete", auth.AuthMiddleware(api.CompleteUploadHandler))
 
 	// Metrics endpoint
-	mux.Handle("/metrics", localOnlyMiddleware(promhttp.Handler()))
+	mux.Handle("/metrics", internalOnlyMiddleware(promhttp.Handler()))
 
 	// Apply CORS middleware to the entire mux
 	handler := handlers.CORSMiddleware(mux)
@@ -364,8 +368,8 @@ func deepHealthHandler(checker *HealthChecker, log *slog.Logger) http.HandlerFun
 	}
 }
 
-// Restrict access to localhost
-func localOnlyMiddleware(next http.Handler) http.Handler {
+// Restrict access to internal networks
+func internalOnlyMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Forwarded-For") != "" {
 			http.Error(w, "Forbidden", http.StatusForbidden)
@@ -373,7 +377,7 @@ func localOnlyMiddleware(next http.Handler) http.Handler {
 		}
 
 		// Verify connection
-		if isLocalRequest(r.RemoteAddr) {
+		if isInternalRequest(r.RemoteAddr) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -383,8 +387,8 @@ func localOnlyMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// Check if request is from localhost
-func isLocalRequest(remoteAddr string) bool {
+// Check if request is from internal network
+func isInternalRequest(remoteAddr string) bool {
 	localPrefixes := []string{
 		"127.0.0.1:",
 		"localhost:",
