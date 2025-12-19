@@ -334,31 +334,35 @@ func (w *Worker) pollQueue(ctx context.Context) {
 		}
 
 		for _, msg := range result.Messages {
-			sem <- struct{}{} // Acquire semaphore
-			wg.Add(1)
+			select {
+			case sem <- struct{}{}:
+				wg.Add(1)
+				go func(msg types.Message) {
+					defer wg.Done()
+					defer func() { <-sem }() // Release semaphore
 
-			go func(msg types.Message) {
-				defer wg.Done()
-				defer func() { <-sem }() // Release semaphore
+					activeJobs.Inc()
+					defer activeJobs.Dec()
 
-				activeJobs.Inc()
-				defer activeJobs.Dec()
-
-				if err := w.processMessage(ctx, msg); err != nil {
-					logger.Error(ctx, w.log, "Failed to process message", "error", err, "messageId", safeStringDeref(msg.MessageId))
-					videosProcessed.WithLabelValues("failed").Inc()
-				} else {
-					// Delete message on success
-					_, delErr := w.sqsClient.DeleteMessage(ctx, &sqs.DeleteMessageInput{
-						QueueUrl:      aws.String(w.sqsQueueURL),
-						ReceiptHandle: msg.ReceiptHandle,
-					})
-					if delErr != nil {
-						logger.Error(ctx, w.log, "Failed to delete message", "error", delErr)
+					if err := w.processMessage(ctx, msg); err != nil {
+						logger.Error(ctx, w.log, "Failed to process message", "error", err, "messageId", safeStringDeref(msg.MessageId))
+						videosProcessed.WithLabelValues("failed").Inc()
+					} else {
+						// Delete message on success
+						_, delErr := w.sqsClient.DeleteMessage(ctx, &sqs.DeleteMessageInput{
+							QueueUrl:      aws.String(w.sqsQueueURL),
+							ReceiptHandle: msg.ReceiptHandle,
+						})
+						if delErr != nil {
+							logger.Error(ctx, w.log, "Failed to delete message", "error", delErr)
+						}
+						videosProcessed.WithLabelValues("success").Inc()
 					}
-					videosProcessed.WithLabelValues("success").Inc()
-				}
-			}(msg)
+				}(msg)
+			case <-ctx.Done():
+				logger.Info(ctx, w.log, "Context cancelled, stopping message processing")
+				break
+			}
 		}
 	}
 }

@@ -173,6 +173,7 @@ resource "aws_ecs_task_definition" "api" {
         { name = "OTEL_EXPORTER_OTLP_ENDPOINT", value = "http://localhost:4317" },
         { name = "PROCESSED_BUCKET", value = aws_s3_bucket.processed.bucket },
         { name = "CDN_DOMAIN", value = "${var.subdomain_label}.${var.root_domain}" },
+        { name = "DYNAMODB_TABLE", value = aws_dynamodb_table.videos.name },
         { name = "ENV", value = var.environment }
       ]
       secrets = [
@@ -253,6 +254,7 @@ resource "aws_ecs_task_definition" "worker" {
         { name = "S3_BUCKET", value = aws_s3_bucket.raw_ingest.bucket },
         { name = "PROCESSED_BUCKET", value = aws_s3_bucket.processed.bucket },
         { name = "SQS_QUEUE_URL", value = aws_sqs_queue.video_queue.id },
+        { name = "DYNAMODB_TABLE", value = aws_dynamodb_table.videos.name },
         { name = "OTEL_EXPORTER_OTLP_ENDPOINT", value = "http://localhost:4317" },
         { name = "MAX_CONCURRENT_JOBS", value = "1" },
         { name = "ENV", value = var.environment }

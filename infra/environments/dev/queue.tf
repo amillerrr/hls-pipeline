@@ -25,7 +25,6 @@ resource "aws_sqs_queue" "video_dlq" {
   name                      = "hls-video-dlq-${var.environment}"
   message_retention_seconds = 1209600 # 14 days
 
-  # FIXED: Added encryption
   sqs_managed_sse_enabled = true
 
   tags = {
@@ -33,6 +32,15 @@ resource "aws_sqs_queue" "video_dlq" {
     Environment = var.environment
     Application = "hls-pipeline"
   }
+}
+
+resource "aws_sqs_queue_redrive_allow_policy" "video_dlq" {
+  queue_url = aws_sqs_queue.video_dlq.id
+
+  redrive_allow_policy = jsonencode({
+    redrivePermission = "byQueue"
+    sourceQueueArns   = [aws_sqs_queue.video_queue.arn]
+  })
 }
 
 # SNS Topic for alerts

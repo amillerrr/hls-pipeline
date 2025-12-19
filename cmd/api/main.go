@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -70,6 +71,17 @@ type ComponentCheck struct {
 	Status  string `json:"status"`
 	Latency string `json:"latency,omitempty"`
 	Error   string `json:"error,omitempty"`
+}
+
+var privateNetworks = []net.IPNet{
+    // 10.0.0.0/8
+    {IP: net.ParseIP("10.0.0.0"), Mask: net.CIDRMask(8, 32)},
+    // 172.16.0.0/12
+    {IP: net.ParseIP("172.16.0.0"), Mask: net.CIDRMask(12, 32)},
+    // 192.168.0.0/16
+    {IP: net.ParseIP("192.168.0.0"), Mask: net.CIDRMask(16, 32)},
+    // localhost
+    {IP: net.ParseIP("127.0.0.0"), Mask: net.CIDRMask(8, 32)},
 }
 
 // Create a new health checker
@@ -389,23 +401,20 @@ func internalOnlyMiddleware(next http.Handler) http.Handler {
 
 // Check if request is from internal network
 func isInternalRequest(remoteAddr string) bool {
-	localPrefixes := []string{
-		"127.0.0.1:",
-		"localhost:",
-		"[::1]:",
-		// Private networks (ECS internal, VPC)
-		"10.",
-		"172.16.", "172.17.", "172.18.", "172.19.",
-		"172.20.", "172.21.", "172.22.", "172.23.",
-		"172.24.", "172.25.", "172.26.", "172.27.",
-		"172.28.", "172.29.", "172.30.", "172.31.",
-		"192.168.",
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return false
 	}
 
-	for _, prefix := range localPrefixes {
-		if len(remoteAddr) >= len(prefix) && remoteAddr[:len(prefix)] == prefix {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	} 
+
+	for _, network := range privateNetworks {
+		if network.Contains(ip) {
 			return true
 		}
 	}
-	return false
+	return ip.IsLoopback()
 }

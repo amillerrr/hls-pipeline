@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,31 +67,38 @@ var (
 type API struct {
 	s3Client    *storage.Client
 	sqsClient   *sqs.Client
+	videoRepo   *storage.VideoRepository
 	sqsQueueURL string
 	log         *slog.Logger
 }
 
-func New(s3 *storage.Client, sqsClient *sqs.Client, sqsQueueURL string, log *slog.Logger) *API {
+func New(s3 *storage.Client, sqsClient *sqs.Client, videoRepo *storage.VideoRepository, sqsQueueURL string, log *slog.Logger) *API {
 	return &API{
 		s3Client:    s3,
 		sqsClient:   sqsClient,
+		videoRepo: videoRepo,
 		sqsQueueURL: sqsQueueURL,
 		log:         log,
 	}
 }
 
+
 // Handle CORS headers for all requests
 func CORSMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		origin := r.Header.Get("Origin")
-		if origin == "" {
-			origin = "*"
+		allowedOrigins := map[string]bool{
+			"https://video.miller.today": true,
+			"https://api.video.miller.today": true,
 		}
-		w.Header().Set("Access-Control-Allow-Origin", origin)
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Requested-With")
-		w.Header().Set("Access-Control-Max-Age", "86400")
-		w.Header().Set("Access-Control-Allow-Credentials", "true")
+
+		origin := r.Header.Get("Origin")
+		if allowedOrigins[origin] {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Requested-With")
+			w.Header().Set("Access-Control-Max-Age", "86400")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		}
 
 		// Handle preflight requests
 		if r.Method == http.MethodOptions {
@@ -151,7 +159,15 @@ func validateContentType(contentType string) error {
 
 // Ensure the key matches expected format and contains allowed extension
 func validateS3Key(key, videoID string) error {
-	// Key must start with "uploads/{videoID}"
+	decodedKey, err := url.PathUnescape(key)
+	if err != nil {
+		return fmt.Errorf("%w: invalid URL encoding", ErrInvalidKeyFormat)
+	}
+	
+	if strings.Contains(decodedKey, "..") || strings.Contains(key, "..") {
+		return fmt.Errorf("%w: path traversal not allowed", ErrInvalidKeyFormat)
+	}
+
 	expectedPrefix := fmt.Sprintf("uploads/%s", videoID)
 	if !strings.HasPrefix(key, expectedPrefix) {
 		return fmt.Errorf("%w: key must start with %s", ErrInvalidKeyFormat, expectedPrefix)

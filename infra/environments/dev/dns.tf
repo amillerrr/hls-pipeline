@@ -10,7 +10,6 @@ locals {
 
 # ALB certificate 
 resource "aws_acm_certificate" "alb_cert" {
-  provider          = aws.us_east_1
   domain_name       = local.api_domain
   validation_method = "DNS"
 

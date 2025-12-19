@@ -64,6 +64,30 @@ resource "aws_iam_role" "api_task_role" {
   }
 }
 
+resource "aws_iam_role_policy" "api_dynamodb_access" {
+  name = "api-dynamodb-access"
+  role = aws_iam_role.api_task_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:Query",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem"
+        ]
+        Resource = [
+          aws_dynamodb_table.videos.arn,
+          "${aws_dynamodb_table.videos.arn}/index/*"
+        ]
+      }
+    ]
+  })
+}
+
 # API S3 access for raw uploads bucket
 resource "aws_iam_role_policy" "api_s3_raw_access" {
   name = "api-s3-raw-access"
@@ -199,6 +223,29 @@ resource "aws_iam_role" "worker_task_role" {
   tags = {
     Name = "hls-worker-task-role"
   }
+}
+
+resource "aws_iam_role_policy" "worker_dynamodb_access" {
+  name = "worker-dynamodb-access"
+  role = aws_iam_role.worker_task_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem"
+        ]
+        Resource = [
+          aws_dynamodb_table.videos.arn,
+          "${aws_dynamodb_table.videos.arn}/index/*"
+        ]
+      }
+    ]
+  })
 }
 
 # Worker S3 read access for raw uploads

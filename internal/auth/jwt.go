@@ -127,6 +127,7 @@ func (rl *rateLimiter) isRateLimited(ip string) bool {
 
 	// Reset if outside window
 	if time.Since(info.firstFail) > RateLimitWindow {
+		delete(rl.attempts, ip)
 		return false
 	}
 
