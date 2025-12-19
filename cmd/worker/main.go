@@ -34,6 +34,7 @@ import (
 
 	"github.com/amillerrr/hls-pipeline/internal/logger"
 	"github.com/amillerrr/hls-pipeline/internal/observability"
+	"github.com/amillerrr/hls-pipeline/internal/storage"
 )
 
 // Configuration constants
@@ -152,9 +153,11 @@ func init() {
 type Worker struct {
 	s3Client        *s3.Client
 	sqsClient       *sqs.Client
+	videoRepo       *storage.VideoRepository
 	sqsQueueURL     string
 	rawBucket       string
 	processedBucket string
+	cdnDomain       string
 	log             *slog.Logger
 	maxConcurrent   int
 	metricsServer   *http.Server
@@ -221,12 +224,20 @@ func main() {
 		}
 	}
 
+	videoRepo, err := storage.NewVideoRepository(context.Background())
+	if err != nil {
+		logger.Error(context.Background(), log, "Failed to initialize video repository", "error", err)
+		os.Exit(1)
+	}
+
 	worker := &Worker{
 		s3Client:        s3.NewFromConfig(cfg),
 		sqsClient:       sqs.NewFromConfig(cfg),
+		videoRepo:       videoRepo,
 		sqsQueueURL:     os.Getenv("SQS_QUEUE_URL"),
 		rawBucket:       os.Getenv("S3_BUCKET"),
 		processedBucket: os.Getenv("PROCESSED_BUCKET"),
+		cdnDomain:       os.Getenv("CDN_DOMAIN"),
 		log:             log,
 		maxConcurrent:   maxConcurrent,
 	}
@@ -276,6 +287,9 @@ func (w *Worker) validateConfig() error {
 	if w.processedBucket == "" {
 		return errors.New("PROCESSED_BUCKET is required")
 	}
+	if w.cdnDomain == "" {
+		return errors.New("CDN_DOMAIN is required")
+	} 
 	return nil
 }
 
@@ -307,6 +321,7 @@ func (w *Worker) pollQueue(ctx context.Context) {
 	sem := make(chan struct{}, w.maxConcurrent)
 	var wg sync.WaitGroup
 
+	messageLoop:
 	for {
 		select {
 		case <-ctx.Done():
@@ -361,8 +376,7 @@ func (w *Worker) pollQueue(ctx context.Context) {
 				}(msg)
 			case <-ctx.Done():
 				logger.Info(ctx, w.log, "Context cancelled, stopping message processing")
-				break
-			}
+				break messageLoop
 		}
 	}
 }
@@ -402,6 +416,19 @@ func (w *Worker) processMessage(ctx context.Context, msg types.Message) error {
 		"s3Key", job.S3Key,
 		"filename", job.Filename,
 	)
+
+	if err := w.videoRepo.UpdateVideoProcessing(ctx, job.VideoID); err != nil {
+		logger.Warn(ctx, w.log, "Failed to update video status to processing", "videoId", job.VideoID, "error", err)
+	}
+
+	var processingErr error
+	defer func() {
+		if processingErr != nil {
+			if failErr := w.videoRepo.FailVideoProcessing(ctx, job.VideoID, processingErr.Error()); failErr != nil {
+				logger.Error(ctx, w.log, "Failed to mark video as failed", "videoId", job.VideoID, "error", failErr)
+			}
+		}
+	}()
 
 	start := time.Now()
 
@@ -449,10 +476,29 @@ func (w *Worker) processMessage(ctx context.Context, msg types.Message) error {
 	duration := time.Since(start).Seconds()
 	processingDuration.WithLabelValues("all").Observe(duration)
 
+	hlsPrefix := fmt.Sprintf("hls/%s/", job.VideoID)
+	playbackURL := fmt.Sprintf("https://%s/hls/%s/master.m3u8", w.cdnDomain, job.VideoID)
+
+	// Convert quality presets to storage format
+	dbPresets := make([]storage.QualityPreset, len(qualityPresets))
+	for i, p := range qualityPresets {
+		dbPresets[i] = storage.QualityPreset{
+			Name:    p.Name,
+			Width:   p.Width,
+			Height:  p.Height,
+			Bitrate: p.Bandwidth,
+		}
+	}
+
+	if err := w.videoRepo.CompleteVideoProcessing(ctx, job.VideoID, playbackURL, hlsPrefix, dbPresets); err != nil {
+		logger.Error(ctx, w.log, "Failed to mark video as completed in DynamoDB", "videoId", job.VideoID, "error", err)
+	}
+
 	logger.Info(ctx, w.log, "Video processed successfully",
 		"videoId", job.VideoID,
 		"filename", job.Filename,
 		"durationSeconds", duration,
+		"playbackURL", playbackURL,
 	)
 
 	return nil
@@ -520,7 +566,7 @@ func (w *Worker) transcodeToHLS(ctx context.Context, videoID string, inputPath s
 	for _, preset := range qualityPresets {
 		dirPath := filepath.Join(hlsDir, preset.Name)
 		if err := os.MkdirAll(dirPath, 0755); err != nil {
-			os.RemoveAll(hlsDir) // Cleanup on error
+			os.RemoveAll(hlsDir)
 			return "", fmt.Errorf("failed to create HLS subdir %s: %w", preset.Name, err)
 		}
 	}

@@ -92,7 +92,7 @@ func NewHealthChecker(s3Client *storage.Client, sqsClient *sqs.Client, sqsQueueU
 		sqsQueueURL: sqsQueueURL,
 		bucket:      bucket,
 		log:         log,
-		cacheTTL:    10 * time.Second, // Cache health check results for 10 seconds
+		cacheTTL:    10 * time.Second, 
 	}
 }
 
@@ -249,6 +249,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	videoRepo, err := storage.NewVideoRepository(context.Background())
+	if err != nil {
+		logger.Error(context.Background(), log, "Failed to initialize video repository", "error", err)
+		os.Exit(1)
+	}
+	logger.Info(context.Background(), log, "DynamoDB video repository initialized")
+
 	// Validate required configuration
 	sqsQueueURL := os.Getenv("SQS_QUEUE_URL")
 	s3Bucket := os.Getenv("S3_BUCKET")
@@ -260,7 +267,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	api := handlers.New(s3Client, sqsClient, sqsQueueURL, log)
+	api := handlers.New(s3Client, sqsClient, videoRepo, sqsQueueURL, log)
 	healthChecker := NewHealthChecker(s3Client, sqsClient, sqsQueueURL, s3Bucket, log)
 
 	// Routing

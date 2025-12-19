@@ -117,8 +117,8 @@ func StopRateLimiter() {
 }
 
 func (rl *rateLimiter) isRateLimited(ip string) bool {
-	rl.mu.RLock()
-	defer rl.mu.RUnlock()
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
 
 	info, exists := rl.attempts[ip]
 	if !exists {

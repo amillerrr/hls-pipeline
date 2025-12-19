@@ -179,11 +179,6 @@ func validateS3Key(key, videoID string) error {
 		return fmt.Errorf("%w: invalid extension in key", ErrInvalidKeyFormat)
 	}
 
-	// Prevent path traversal
-	if strings.Contains(key, "..") {
-		return fmt.Errorf("%w: path traversal not allowed", ErrInvalidKeyFormat)
-	}
-
 	return nil
 }
 
@@ -437,14 +432,34 @@ func (a *API) CompleteUploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Log file size for monitoring
+	// Get file size for logging and DynamoDB record
+	var fileSizeBytes int64
 	if headResult.ContentLength != nil {
-		span.SetAttributes(attribute.Int64("video.size_bytes", *headResult.ContentLength))
+		fileSizeBytes = *headResult.ContentLength
+		span.SetAttributes(attribute.Int64("video.size_bytes", fileSizeBytes))
 		logger.Info(ctx, a.log, "Upload verified",
 			"videoId", req.VideoID,
-			"sizeBytes", *headResult.ContentLength,
+			"sizeBytes", fileSizeBytes,
 			"requestId", requestID,
 		)
+	}
+
+	if a.videoRepo != nil {
+		_, err := a.videoRepo.CreateVideo(ctx, req.VideoID, req.Filename, req.Key, fileSizeBytes)
+		if err != nil {
+			// Log warning but don't fail - SQS message will still be sent
+			logger.Warn(ctx, a.log, "Failed to create video record in DynamoDB",
+				"videoId", req.VideoID,
+				"error", err,
+				"requestId", requestID,
+			)
+		} else {
+			logger.Info(ctx, a.log, "Created video record in DynamoDB",
+				"videoId", req.VideoID,
+				"status", "pending",
+				"requestId", requestID,
+			)
+		}
 	}
 
 	// Queue processing job
@@ -507,6 +522,35 @@ func (a *API) GetLatestVideoHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, span := tracer.Start(ctx, "get-latest-video")
 	defer span.End()
 
+	if a.videoRepo != nil {
+		video, err := a.videoRepo.GetLatestVideo(ctx)
+		if err != nil {
+			if errors.Is(err, storage.ErrVideoNotFound) {
+				logger.Info(ctx, a.log, "No video found in DynamoDB, falling back to S3 listing")
+			} else {
+				span.RecordError(err)
+				logger.Error(ctx, a.log, "Failed to get latest video from DynamoDB", "error", err)
+			}
+		} else {
+			span.SetAttributes(
+				attribute.String("video.id", video.VideoID),
+				attribute.String("video.source", "dynamodb"),
+			)
+
+			logger.Info(ctx, a.log, "Retrieved latest video from DynamoDB",
+				"videoId", video.VideoID,
+				"playbackUrl", video.PlaybackURL,
+			)
+
+			a.writeJSON(ctx, w, http.StatusOK, LatestVideoResponse{
+				VideoID:     video.VideoID,
+				PlaybackURL: video.PlaybackURL,
+				ProcessedAt: video.ProcessedAt,
+			})
+			return
+		}
+	}
+
 	processedBucket := os.Getenv("PROCESSED_BUCKET")
 	cdnDomain := os.Getenv("CDN_DOMAIN")
 
@@ -564,9 +608,14 @@ func (a *API) GetLatestVideoHandler(w http.ResponseWriter, r *http.Request) {
 	span.SetAttributes(
 		attribute.String("video.id", videoID),
 		attribute.String("video.key", latestKey),
+		attribute.String("video.source", "s3_fallback"),
 	)
 
 	playbackURL := fmt.Sprintf("https://%s/%s", cdnDomain, latestKey)
+
+	logger.Warn(ctx, a.log, "Used S3 fallback for latest video lookup - consider running migration",
+		"videoId", videoID,
+	)
 
 	a.writeJSON(ctx, w, http.StatusOK, LatestVideoResponse{
 		VideoID:     videoID,
