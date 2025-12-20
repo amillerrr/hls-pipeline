@@ -21,7 +21,7 @@ func InitTracer(ctx context.Context, serviceName string) (func(context.Context) 
 	endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
 	if endpoint == "" {
 		endpoint = "localhost:4317"
-	} 
+	}
 
 	endpoint = strings.TrimPrefix(endpoint, "http://")
 	endpoint = strings.TrimPrefix(endpoint, "https://")

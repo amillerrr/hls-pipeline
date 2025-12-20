@@ -29,10 +29,10 @@ const (
 )
 
 type QualityPreset struct {
-	Name      string `dynamodbav:"name"`
-	Width     int    `dynamodbav:"width"`
-	Height    int    `dynamodbav:"height"`
-	Bitrate   int    `dynamodbav:"bitrate"`
+	Name    string `dynamodbav:"name"`
+	Width   int    `dynamodbav:"width"`
+	Height  int    `dynamodbav:"height"`
+	Bitrate int    `dynamodbav:"bitrate"`
 }
 
 type VideoMetadata struct {
@@ -43,19 +43,19 @@ type VideoMetadata struct {
 	GSI1SK string `dynamodbav:"gsi1sk,omitempty"`
 
 	// Attributes
-	VideoID        string          `dynamodbav:"video_id"`
-	Filename       string          `dynamodbav:"filename"`
-	Status         VideoStatus     `dynamodbav:"status"`
-	S3RawKey       string          `dynamodbav:"s3_raw_key"`
-	S3HLSPrefix    string          `dynamodbav:"s3_hls_prefix,omitempty"`
-	PlaybackURL    string          `dynamodbav:"playback_url,omitempty"`
-	FileSizeBytes  int64           `dynamodbav:"file_size_bytes,omitempty"`
-	DurationSeconds float64        `dynamodbav:"duration_seconds,omitempty"`
-	CreatedAt      string          `dynamodbav:"created_at"`
-	UpdatedAt      string          `dynamodbav:"updated_at"`
-	ProcessedAt    string          `dynamodbav:"processed_at,omitempty"`
-	QualityPresets []QualityPreset `dynamodbav:"quality_presets,omitempty"`
-	ErrorMessage   string          `dynamodbav:"error_message,omitempty"`
+	VideoID         string          `dynamodbav:"video_id"`
+	Filename        string          `dynamodbav:"filename"`
+	Status          VideoStatus     `dynamodbav:"status"`
+	S3RawKey        string          `dynamodbav:"s3_raw_key"`
+	S3HLSPrefix     string          `dynamodbav:"s3_hls_prefix,omitempty"`
+	PlaybackURL     string          `dynamodbav:"playback_url,omitempty"`
+	FileSizeBytes   int64           `dynamodbav:"file_size_bytes,omitempty"`
+	DurationSeconds float64         `dynamodbav:"duration_seconds,omitempty"`
+	CreatedAt       string          `dynamodbav:"created_at"`
+	UpdatedAt       string          `dynamodbav:"updated_at"`
+	ProcessedAt     string          `dynamodbav:"processed_at,omitempty"`
+	QualityPresets  []QualityPreset `dynamodbav:"quality_presets,omitempty"`
+	ErrorMessage    string          `dynamodbav:"error_message,omitempty"`
 }
 
 type VideoRepository struct {
@@ -85,7 +85,7 @@ func NewVideoRepository(ctx context.Context) (*VideoRepository, error) {
 // CreateVideo creates a new video metadata record
 func (r *VideoRepository) CreateVideo(ctx context.Context, videoID, filename, s3RawKey string, fileSizeBytes int64) (*VideoMetadata, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
-	
+
 	video := &VideoMetadata{
 		PK:            fmt.Sprintf("VIDEO#%s", videoID),
 		SK:            "METADATA",

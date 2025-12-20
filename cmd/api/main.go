@@ -74,14 +74,14 @@ type ComponentCheck struct {
 }
 
 var privateNetworks = []net.IPNet{
-    // 10.0.0.0/8
-    {IP: net.ParseIP("10.0.0.0"), Mask: net.CIDRMask(8, 32)},
-    // 172.16.0.0/12
-    {IP: net.ParseIP("172.16.0.0"), Mask: net.CIDRMask(12, 32)},
-    // 192.168.0.0/16
-    {IP: net.ParseIP("192.168.0.0"), Mask: net.CIDRMask(16, 32)},
-    // localhost
-    {IP: net.ParseIP("127.0.0.0"), Mask: net.CIDRMask(8, 32)},
+	// 10.0.0.0/8
+	{IP: net.ParseIP("10.0.0.0"), Mask: net.CIDRMask(8, 32)},
+	// 172.16.0.0/12
+	{IP: net.ParseIP("172.16.0.0"), Mask: net.CIDRMask(12, 32)},
+	// 192.168.0.0/16
+	{IP: net.ParseIP("192.168.0.0"), Mask: net.CIDRMask(16, 32)},
+	// localhost
+	{IP: net.ParseIP("127.0.0.0"), Mask: net.CIDRMask(8, 32)},
 }
 
 // Create a new health checker
@@ -92,7 +92,7 @@ func NewHealthChecker(s3Client *storage.Client, sqsClient *sqs.Client, sqsQueueU
 		sqsQueueURL: sqsQueueURL,
 		bucket:      bucket,
 		log:         log,
-		cacheTTL:    10 * time.Second, 
+		cacheTTL:    10 * time.Second,
 	}
 }
 
@@ -416,7 +416,7 @@ func isInternalRequest(remoteAddr string) bool {
 	ip := net.ParseIP(host)
 	if ip == nil {
 		return false
-	} 
+	}
 
 	for _, network := range privateNetworks {
 		if network.Contains(ip) {

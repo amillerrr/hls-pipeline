@@ -76,18 +76,17 @@ func New(s3 *storage.Client, sqsClient *sqs.Client, videoRepo *storage.VideoRepo
 	return &API{
 		s3Client:    s3,
 		sqsClient:   sqsClient,
-		videoRepo: videoRepo,
+		videoRepo:   videoRepo,
 		sqsQueueURL: sqsQueueURL,
 		log:         log,
 	}
 }
 
-
 // Handle CORS headers for all requests
 func CORSMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		allowedOrigins := map[string]bool{
-			"https://video.miller.today": true,
+			"https://video.miller.today":     true,
 			"https://api.video.miller.today": true,
 		}
 
@@ -163,7 +162,7 @@ func validateS3Key(key, videoID string) error {
 	if err != nil {
 		return fmt.Errorf("%w: invalid URL encoding", ErrInvalidKeyFormat)
 	}
-	
+
 	if strings.Contains(decodedKey, "..") || strings.Contains(key, "..") {
 		return fmt.Errorf("%w: path traversal not allowed", ErrInvalidKeyFormat)
 	}
@@ -271,7 +270,7 @@ func (a *API) InitUploadHandler(w http.ResponseWriter, r *http.Request) {
 		trace.WithAttributes(
 			attribute.String("handler", "init-upload"),
 			attribute.String("request.id", requestID),
-			))
+		))
 	defer span.End()
 
 	a.limitRequestBody(w, r)
@@ -348,9 +347,9 @@ type CompleteUploadRequest struct {
 
 // Response payload for completed uploads
 type CompleteUploadResponse struct {
-	VideoID string `json:"videoId"`
-	Status  string `json:"status"`
-	Message string `json:"message"`
+	VideoID   string `json:"videoId"`
+	Status    string `json:"status"`
+	Message   string `json:"message"`
 	RequestID string `json:"requestId"`
 }
 
@@ -496,9 +495,9 @@ func (a *API) CompleteUploadHandler(w http.ResponseWriter, r *http.Request) {
 	logger.Info(ctx, a.log, "Processing job queued", "videoId", req.VideoID, "requestId", requestID)
 
 	a.writeJSON(ctx, w, http.StatusAccepted, CompleteUploadResponse{
-		VideoID: req.VideoID,
-		Status:  "processing",
-		Message: "Video queued for processing",
+		VideoID:   req.VideoID,
+		Status:    "processing",
+		Message:   "Video queued for processing",
 		RequestID: requestID,
 	})
 }

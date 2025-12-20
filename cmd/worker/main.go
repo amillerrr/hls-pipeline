@@ -289,7 +289,7 @@ func (w *Worker) validateConfig() error {
 	}
 	if w.cdnDomain == "" {
 		return errors.New("CDN_DOMAIN is required")
-	} 
+	}
 	return nil
 }
 
@@ -321,7 +321,7 @@ func (w *Worker) pollQueue(ctx context.Context) {
 	sem := make(chan struct{}, w.maxConcurrent)
 	var wg sync.WaitGroup
 
-	messageLoop:
+messageLoop:
 	for {
 		select {
 		case <-ctx.Done():
@@ -377,6 +377,7 @@ func (w *Worker) pollQueue(ctx context.Context) {
 			case <-ctx.Done():
 				logger.Info(ctx, w.log, "Context cancelled, stopping message processing")
 				break messageLoop
+			}
 		}
 	}
 }
