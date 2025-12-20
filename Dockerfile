@@ -3,40 +3,47 @@ FROM golang:1.24-alpine AS builder
 
 WORKDIR /app
 
-# Download dependencies 
-COPY go.mod go.sum ./
+# Install build dependencies
+RUN apk add --no-cache git ca-certificates
+
+# Copy go mod files
+COPY go.mod go.sum* ./
 RUN go mod download
 
+# Copy source code
 COPY . .
 
-# Build the API binary
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o api-server ./cmd/api
+# Build the binary
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /worker ./cmd/worker
 
-# Stage 2: Runner
+# Final stage
 FROM alpine:3.22.2
-
-# Install runtime dependencies
-RUN apk add --no-cache ca-certificates tzdata wget
 
 WORKDIR /app
 
-RUN addgroup -g 1000 appgroup && \
-  adduser -u 1000 -G appgroup -D -h /app appuser && \
-  chown -R appuser:appgroup /app
+# Install runtime dependencies including FFmpeg
+RUN apk add --no-cache \
+    ca-certificates \
+    tzdata \
+    ffmpeg
 
-# Copy the binary from the builder stage
-COPY --from=builder /app/api-server .
-RUN chown appuser:appgroup /app/api-server
+# Copy binary from builder
+COPY --from=builder /worker /app/worker
 
-# Switch to non-root user
+# Create temp directories
+RUN mkdir -p /tmp/uploads /tmp/hls
+
+# Create non-root user
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+RUN chown -R appuser:appgroup /tmp/uploads /tmp/hls
 USER appuser
 
-# Expose the port defined in main.go
-EXPOSE 8080
+# Expose metrics port
+EXPOSE 2112
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
+    CMD wget --no-verbose --tries=1 --spider http://localhost:2112/health || exit 1
 
 # Run the binary
-CMD ["./api-server"]
+ENTRYPOINT ["/app/worker"]

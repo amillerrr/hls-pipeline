@@ -4,96 +4,67 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
+
+	"github.com/amillerrr/hls-pipeline/internal/config"
+	"github.com/amillerrr/hls-pipeline/pkg/models"
 )
 
-var (
-	ErrVideoNotFound = errors.New("video not found")
-	ErrInvalidStatus = errors.New("invalid video status")
-)
-
-type VideoStatus string
-
-const (
-	StatusPending    VideoStatus = "pending"
-	StatusProcessing VideoStatus = "processing"
-	StatusCompleted  VideoStatus = "completed"
-	StatusFailed     VideoStatus = "failed"
-)
-
-type QualityPreset struct {
-	Name    string `dynamodbav:"name"`
-	Width   int    `dynamodbav:"width"`
-	Height  int    `dynamodbav:"height"`
-	Bitrate int    `dynamodbav:"bitrate"`
-}
-
-type VideoMetadata struct {
-	// Keys
-	PK     string `dynamodbav:"pk"`
-	SK     string `dynamodbav:"sk"`
-	GSI1PK string `dynamodbav:"gsi1pk,omitempty"`
-	GSI1SK string `dynamodbav:"gsi1sk,omitempty"`
-
-	// Attributes
-	VideoID         string          `dynamodbav:"video_id"`
-	Filename        string          `dynamodbav:"filename"`
-	Status          VideoStatus     `dynamodbav:"status"`
-	S3RawKey        string          `dynamodbav:"s3_raw_key"`
-	S3HLSPrefix     string          `dynamodbav:"s3_hls_prefix,omitempty"`
-	PlaybackURL     string          `dynamodbav:"playback_url,omitempty"`
-	FileSizeBytes   int64           `dynamodbav:"file_size_bytes,omitempty"`
-	DurationSeconds float64         `dynamodbav:"duration_seconds,omitempty"`
-	CreatedAt       string          `dynamodbav:"created_at"`
-	UpdatedAt       string          `dynamodbav:"updated_at"`
-	ProcessedAt     string          `dynamodbav:"processed_at,omitempty"`
-	QualityPresets  []QualityPreset `dynamodbav:"quality_presets,omitempty"`
-	ErrorMessage    string          `dynamodbav:"error_message,omitempty"`
-}
-
+// VideoRepository handles video metadata storage in DynamoDB.
 type VideoRepository struct {
 	client    *dynamodb.Client
 	tableName string
 }
 
-func NewVideoRepository(ctx context.Context) (*VideoRepository, error) {
-	cfg, err := config.LoadDefaultConfig(ctx,
-		config.WithRegion(os.Getenv("AWS_REGION")),
+// NewVideoRepository creates a new VideoRepository using the provided configuration.
+func NewVideoRepository(ctx context.Context, cfg *config.Config) (*VideoRepository, error) {
+	if cfg.AWS.DynamoDBTable == "" {
+		return nil, errors.New("DynamoDB table name is required")
+	}
+
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
+		awsconfig.WithRegion(cfg.AWS.Region),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
 
-	tableName := os.Getenv("DYNAMODB_TABLE")
-	if tableName == "" {
-		return nil, errors.New("DYNAMODB_TABLE environment variable not set")
-	}
+	// Add OpenTelemetry instrumentation
+	otelaws.AppendMiddlewares(&awsCfg.APIOptions)
 
 	return &VideoRepository{
-		client:    dynamodb.NewFromConfig(cfg),
-		tableName: tableName,
+		client:    dynamodb.NewFromConfig(awsCfg),
+		tableName: cfg.AWS.DynamoDBTable,
 	}, nil
 }
 
-// CreateVideo creates a new video metadata record
-func (r *VideoRepository) CreateVideo(ctx context.Context, videoID, filename, s3RawKey string, fileSizeBytes int64) (*VideoMetadata, error) {
+// NewVideoRepositoryFromClient creates a new VideoRepository from an existing DynamoDB client.
+func NewVideoRepositoryFromClient(client *dynamodb.Client, tableName string) *VideoRepository {
+	return &VideoRepository{
+		client:    client,
+		tableName: tableName,
+	}
+}
+
+// CreateVideo creates a new video metadata record.
+func (r *VideoRepository) CreateVideo(ctx context.Context, videoID, filename, s3RawKey string, fileSizeBytes int64) (*models.VideoMetadata, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	video := &VideoMetadata{
+	video := &models.VideoMetadata{
 		PK:            fmt.Sprintf("VIDEO#%s", videoID),
 		SK:            "METADATA",
 		GSI1PK:        "ALL_VIDEOS",
 		GSI1SK:        fmt.Sprintf("%s#%s", now, videoID),
 		VideoID:       videoID,
 		Filename:      filename,
-		Status:        StatusPending,
+		Status:        models.StatusPending,
 		S3RawKey:      s3RawKey,
 		FileSizeBytes: fileSizeBytes,
 		CreatedAt:     now,
@@ -121,8 +92,8 @@ func (r *VideoRepository) CreateVideo(ctx context.Context, videoID, filename, s3
 	return video, nil
 }
 
-// GetVideo retrieves video metadata by ID
-func (r *VideoRepository) GetVideo(ctx context.Context, videoID string) (*VideoMetadata, error) {
+// GetVideo retrieves video metadata by ID.
+func (r *VideoRepository) GetVideo(ctx context.Context, videoID string) (*models.VideoMetadata, error) {
 	result, err := r.client.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(r.tableName),
 		Key: map[string]types.AttributeValue{
@@ -135,10 +106,10 @@ func (r *VideoRepository) GetVideo(ctx context.Context, videoID string) (*VideoM
 	}
 
 	if result.Item == nil {
-		return nil, ErrVideoNotFound
+		return nil, models.ErrVideoNotFound
 	}
 
-	var video VideoMetadata
+	var video models.VideoMetadata
 	if err := attributevalue.UnmarshalMap(result.Item, &video); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal video: %w", err)
 	}
@@ -146,7 +117,7 @@ func (r *VideoRepository) GetVideo(ctx context.Context, videoID string) (*VideoM
 	return &video, nil
 }
 
-// UpdateVideoProcessing marks a video as processing
+// UpdateVideoProcessing marks a video as processing.
 func (r *VideoRepository) UpdateVideoProcessing(ctx context.Context, videoID string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 
@@ -161,7 +132,7 @@ func (r *VideoRepository) UpdateVideoProcessing(ctx context.Context, videoID str
 			"#status": "status",
 		},
 		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":status":     &types.AttributeValueMemberS{Value: string(StatusProcessing)},
+			":status":     &types.AttributeValueMemberS{Value: string(models.StatusProcessing)},
 			":updated_at": &types.AttributeValueMemberS{Value: now},
 		},
 		ConditionExpression: aws.String("attribute_exists(pk)"),
@@ -169,7 +140,7 @@ func (r *VideoRepository) UpdateVideoProcessing(ctx context.Context, videoID str
 	if err != nil {
 		var condErr *types.ConditionalCheckFailedException
 		if errors.As(err, &condErr) {
-			return ErrVideoNotFound
+			return models.ErrVideoNotFound
 		}
 		return fmt.Errorf("failed to update video: %w", err)
 	}
@@ -177,8 +148,8 @@ func (r *VideoRepository) UpdateVideoProcessing(ctx context.Context, videoID str
 	return nil
 }
 
-// CompleteVideoProcessing marks a video as completed and updates the latest pointer
-func (r *VideoRepository) CompleteVideoProcessing(ctx context.Context, videoID, playbackURL, hlsPrefix string, presets []QualityPreset) error {
+// CompleteVideoProcessing marks a video as completed and updates the latest pointer.
+func (r *VideoRepository) CompleteVideoProcessing(ctx context.Context, videoID, playbackURL, hlsPrefix string, presets []models.QualityPreset) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	presetsAV, err := attributevalue.MarshalList(presets)
@@ -205,7 +176,7 @@ func (r *VideoRepository) CompleteVideoProcessing(ctx context.Context, videoID, 
 			"#status": "status",
 		},
 		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":status":       &types.AttributeValueMemberS{Value: string(StatusCompleted)},
+			":status":       &types.AttributeValueMemberS{Value: string(models.StatusCompleted)},
 			":updated_at":   &types.AttributeValueMemberS{Value: now},
 			":processed_at": &types.AttributeValueMemberS{Value: now},
 			":playback_url": &types.AttributeValueMemberS{Value: playbackURL},
@@ -237,7 +208,7 @@ func (r *VideoRepository) CompleteVideoProcessing(ctx context.Context, videoID, 
 	return nil
 }
 
-// FailVideoProcessing marks a video as failed
+// FailVideoProcessing marks a video as failed.
 func (r *VideoRepository) FailVideoProcessing(ctx context.Context, videoID, errorMessage string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 
@@ -252,7 +223,7 @@ func (r *VideoRepository) FailVideoProcessing(ctx context.Context, videoID, erro
 			"#status": "status",
 		},
 		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":status":     &types.AttributeValueMemberS{Value: string(StatusFailed)},
+			":status":     &types.AttributeValueMemberS{Value: string(models.StatusFailed)},
 			":updated_at": &types.AttributeValueMemberS{Value: now},
 			":error":      &types.AttributeValueMemberS{Value: errorMessage},
 		},
@@ -264,8 +235,8 @@ func (r *VideoRepository) FailVideoProcessing(ctx context.Context, videoID, erro
 	return nil
 }
 
-// GetLatestVideo retrieves the most recently processed video (O(1) operation)
-func (r *VideoRepository) GetLatestVideo(ctx context.Context) (*VideoMetadata, error) {
+// GetLatestVideo retrieves the most recently processed video (O(1) operation).
+func (r *VideoRepository) GetLatestVideo(ctx context.Context) (*models.VideoMetadata, error) {
 	// First, get the LATEST pointer
 	result, err := r.client.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(r.tableName),
@@ -279,13 +250,13 @@ func (r *VideoRepository) GetLatestVideo(ctx context.Context) (*VideoMetadata, e
 	}
 
 	if result.Item == nil {
-		return nil, ErrVideoNotFound
+		return nil, models.ErrVideoNotFound
 	}
 
 	// Extract video ID from pointer
 	videoIDAttr, ok := result.Item["video_id"]
 	if !ok {
-		return nil, ErrVideoNotFound
+		return nil, models.ErrVideoNotFound
 	}
 
 	videoIDVal, ok := videoIDAttr.(*types.AttributeValueMemberS)
@@ -297,8 +268,8 @@ func (r *VideoRepository) GetLatestVideo(ctx context.Context) (*VideoMetadata, e
 	return r.GetVideo(ctx, videoIDVal.Value)
 }
 
-// ListVideos retrieves videos in reverse chronological order
-func (r *VideoRepository) ListVideos(ctx context.Context, limit int32, startKey map[string]types.AttributeValue) ([]VideoMetadata, map[string]types.AttributeValue, error) {
+// ListVideos retrieves videos in reverse chronological order.
+func (r *VideoRepository) ListVideos(ctx context.Context, limit int32, startKey map[string]types.AttributeValue) ([]models.VideoMetadata, map[string]types.AttributeValue, error) {
 	input := &dynamodb.QueryInput{
 		TableName:              aws.String(r.tableName),
 		IndexName:              aws.String("GSI1"),
@@ -319,7 +290,7 @@ func (r *VideoRepository) ListVideos(ctx context.Context, limit int32, startKey 
 		return nil, nil, fmt.Errorf("failed to list videos: %w", err)
 	}
 
-	var videos []VideoMetadata
+	var videos []models.VideoMetadata
 	if err := attributevalue.UnmarshalListOfMaps(result.Items, &videos); err != nil {
 		return nil, nil, fmt.Errorf("failed to unmarshal videos: %w", err)
 	}
