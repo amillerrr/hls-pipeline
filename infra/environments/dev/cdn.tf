@@ -32,7 +32,7 @@ resource "aws_cloudfront_response_headers_policy" "security_headers" {
     }
     content_security_policy {
       content_security_policy = "default-src 'self'; script-src 'self' cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'"
-      override = true
+      override                = true
     }
   }
 }

@@ -14,36 +14,29 @@ RUN go mod download
 COPY . .
 
 # Build the binary
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /worker ./cmd/worker
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /api ./cmd/api
 
 # Final stage
 FROM alpine:3.22.2
 
 WORKDIR /app
 
-# Install runtime dependencies including FFmpeg
-RUN apk add --no-cache \
-    ca-certificates \
-    tzdata \
-    ffmpeg
+# Install runtime dependencies
+RUN apk add --no-cache ca-certificates tzdata
 
 # Copy binary from builder
-COPY --from=builder /worker /app/worker
-
-# Create temp directories
-RUN mkdir -p /tmp/uploads /tmp/hls
+COPY --from=builder /api /app/api
 
 # Create non-root user
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
-RUN chown -R appuser:appgroup /tmp/uploads /tmp/hls
 USER appuser
 
-# Expose metrics port
-EXPOSE 2112
+# Expose port
+EXPOSE 8080
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:2112/health || exit 1
+    CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
 
 # Run the binary
-ENTRYPOINT ["/app/worker"]
+ENTRYPOINT ["/app/api"]
