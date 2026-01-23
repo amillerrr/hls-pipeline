@@ -16,6 +16,7 @@ type JobInput struct {
 	OutputDir  string
 	StreamID   string
 	Presets    []config.PresetConfig
+	EnableDRM  bool
 }
 
 // Ensure Pipeline satisfies the interface

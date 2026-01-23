@@ -78,10 +78,16 @@ module "live" {
   output_bucket_arn = aws_s3_bucket.processed.arn
   cdn_domain        = aws_cloudfront_distribution.main.domain_name
 
+  # Database connection for state
+  dynamodb_table_name = aws_dynamodb_table.videos.name
+  dynamodb_table_arn  = aws_dynamodb_table.videos.arn
+
   cpu           = var.live_cpu
   memory        = var.live_memory
   desired_count = var.live_desired_count
   enable_nlb    = var.enable_live_nlb
+
+  execution_role_arn = aws_iam_role.task_execution.arn
 
   tags = local.common_tags
 }

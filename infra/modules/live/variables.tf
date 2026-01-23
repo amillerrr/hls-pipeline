@@ -43,6 +43,16 @@ variable "cdn_domain" {
   type        = string
 }
 
+variable "dynamodb_table_name" {
+  description = "DynamoDB table name for stream state"
+  type        = string
+}
+
+variable "dynamodb_table_arn" {
+  description = "DynamoDB table ARN for stream state"
+  type        = string
+}
+
 variable "cpu" {
   description = "Task CPU units"
   type        = number

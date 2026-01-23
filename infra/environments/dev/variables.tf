@@ -232,6 +232,18 @@ variable "jwt_secret_arn" {
   default     = ""
 }
 
+# DNS Configuration
+variable "root_domain" {
+  description = "Root domain name (e.g. example.com)"
+  type        = string
+}
+
+variable "subdomain_label" {
+  description = "Subdomain label for this environment (e.g. dev-video)"
+  type        = string
+  default     = "video"
+}
+
 # Live Streaming (Optional)
 
 variable "enable_live" {

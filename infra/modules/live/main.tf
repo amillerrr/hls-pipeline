@@ -1,10 +1,8 @@
-# Live Streaming Module - Main Configuration
-# This module sets up live streaming infrastructure with ECS, NLB,
-# and supporting resources for SRT/RTMP ingest and LL-HLS output.
-
 locals {
   name_prefix = "hls-pipeline-${var.environment}-live"
 }
+
+data "aws_region" "current" {}
 
 # Security Group
 resource "aws_security_group" "live" {
@@ -30,7 +28,7 @@ resource "aws_security_group" "live" {
     description = "RTMP ingest"
   }
 
-  # Health check
+  # Health check / API
   ingress {
     from_port   = 8080
     to_port     = 8080
@@ -56,12 +54,10 @@ resource "aws_security_group" "live" {
 resource "aws_cloudwatch_log_group" "live" {
   name              = "/ecs/${local.name_prefix}"
   retention_in_days = 30
-
-  tags = var.tags
+  tags              = var.tags
 }
 
 # IAM Role for Live Tasks
-
 resource "aws_iam_role" "live_task" {
   name = "${local.name_prefix}-task"
 
@@ -93,27 +89,33 @@ resource "aws_iam_role_policy" "live_task" {
         Action = [
           "s3:PutObject",
           "s3:GetObject",
-          "s3:DeleteObject"
-        ]
-        Resource = "${var.output_bucket_arn}/*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
+          "s3:DeleteObject",
           "s3:ListBucket"
         ]
-        Resource = var.output_bucket_arn
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "cloudwatch:PutMetricData"
+        Resource = [
+          var.output_bucket_arn,
+          "${var.output_bucket_arn}/*"
         ]
-        Resource = "*"
       },
       {
         Effect = "Allow"
         Action = [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:Query",
+          "dynamodb:Scan"
+        ]
+        Resource = [
+          var.dynamodb_table_arn,
+          "${var.dynamodb_table_arn}/index/*"
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "cloudwatch:PutMetricData",
           "xray:PutTraceSegments",
           "xray:PutTelemetryRecords"
         ]
@@ -139,32 +141,18 @@ resource "aws_ecs_task_definition" "live" {
       image = var.live_image
 
       portMappings = [
-        {
-          containerPort = 9998
-          hostPort      = 9998
-          protocol      = "udp"
-        },
-        {
-          containerPort = 9999
-          hostPort      = 9999
-          protocol      = "udp"
-        },
-        {
-          containerPort = 1935
-          hostPort      = 1935
-          protocol      = "tcp"
-        },
-        {
-          containerPort = 8080
-          hostPort      = 8080
-          protocol      = "tcp"
-        }
+        { containerPort = 9998, hostPort = 9998, protocol = "udp" },
+        { containerPort = 9999, hostPort = 9999, protocol = "udp" },
+        { containerPort = 1935, hostPort = 1935, protocol = "tcp" },
+        { containerPort = 8080, hostPort = 8080, protocol = "tcp" }
       ]
 
       environment = [
         { name = "OUTPUT_BUCKET", value = var.output_bucket },
         { name = "CDN_DOMAIN", value = var.cdn_domain },
         { name = "ENVIRONMENT", value = var.environment },
+        { name = "DYNAMODB_TABLE", value = var.dynamodb_table_name },
+        { name = "AWS_REGION", value = data.aws_region.current.name }
       ]
 
       logConfiguration = {
@@ -231,11 +219,10 @@ resource "aws_ecs_service" "live" {
 resource "aws_lb" "live" {
   count = var.enable_nlb ? 1 : 0
 
-  name               = "${local.name_prefix}-nlb"
-  internal           = false
-  load_balancer_type = "network"
-  subnets            = var.subnet_ids
-
+  name                             = "${local.name_prefix}-nlb"
+  internal                         = false
+  load_balancer_type               = "network"
+  subnets                          = var.subnet_ids
   enable_cross_zone_load_balancing = true
 
   tags = merge(var.tags, {
@@ -308,7 +295,3 @@ resource "aws_lb_listener" "rtmp" {
     target_group_arn = aws_lb_target_group.rtmp[0].arn
   }
 }
-
-# Data Sources
-data "aws_region" "current" {}
-
