@@ -2,142 +2,187 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	"github.com/joho/godotenv"
-	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-sdk-go-v2/otelaws"
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/amillerrr/hls-pipeline/internal/api"
-	"github.com/amillerrr/hls-pipeline/internal/auth"
-	"github.com/amillerrr/hls-pipeline/internal/config"
-	"github.com/amillerrr/hls-pipeline/internal/health"
-	"github.com/amillerrr/hls-pipeline/internal/observability"
-	"github.com/amillerrr/hls-pipeline/internal/storage"
-)
-
-const (
-	ShutdownTimeout       = 30 * time.Second
-	TracerShutdownTimeout = 5 * time.Second
-	AWSConfigTimeout      = 10 * time.Second
+	appconfig "github.com/amillerrr/hls-pipeline/internal/config"
 )
 
 func main() {
-	// Initialize logger
-	log := observability.NewLogger()
-	slog.SetDefault(log)
+	// Initialize structured logger
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: getLogLevel(),
+	}))
+	slog.SetDefault(logger)
 
-	// Load .env file if present
-	if err := godotenv.Load(); err != nil {
-		log.Info("No .env file found, using system environment variables")
-	}
+	logger.Info("Starting HLS Pipeline API",
+		"version", getEnv("SERVICE_VERSION", "dev"),
+	)
 
 	// Load configuration
-	cfg, err := config.LoadAPI()
+	cfg, err := appconfig.LoadAPI()
 	if err != nil {
-		log.Error("Failed to load configuration", "error", err)
+		logger.Error("Failed to load configuration", "error", err)
 		os.Exit(1)
 	}
 
-	// Initialize tracer
-	shutdownTracer, err := observability.InitTracer(context.Background(), "hls-api", cfg)
+	// Initialize AWS SDK
+	ctx := context.Background()
+	awsCfg, err := config.LoadDefaultConfig(ctx,
+		config.WithRegion(cfg.AWS.Region),
+	)
 	if err != nil {
-		log.Error("Failed to initialize tracer", "error", err)
+		logger.Error("Failed to load AWS config", "error", err)
 		os.Exit(1)
 	}
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), TracerShutdownTimeout)
-		defer cancel()
-		if err := shutdownTracer(ctx); err != nil {
-			log.Error("Failed to shutdown tracer", "error", err)
-		}
-	}()
 
-	// Initialize AWS clients
-	ctx, cancel := context.WithTimeout(context.Background(), AWSConfigTimeout)
-	defer cancel()
-
-	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(cfg.AWS.Region))
-	if err != nil {
-		log.Error("Failed to load AWS config", "error", err)
-		os.Exit(1)
-	}
-	otelaws.AppendMiddlewares(&awsCfg.APIOptions)
-
+	// Create AWS clients
+	s3Client := s3.NewFromConfig(awsCfg)
 	sqsClient := sqs.NewFromConfig(awsCfg)
-	s3Client := storage.NewS3ClientFromAWSConfig(awsCfg)
+	dynamoClient := dynamodb.NewFromConfig(awsCfg)
 
-	// Initialize video repository
-	videoRepo, err := storage.NewVideoRepository(context.Background(), cfg)
-	if err != nil {
-		log.Error("Failed to initialize video repository", "error", err)
-		os.Exit(1)
-	}
-	log.Info("DynamoDB video repository initialized")
-
-	// Initialize JWT service
-	jwtSecret, err := cfg.GetJWTSecret()
-	if err != nil {
-		log.Error("Failed to get JWT secret", "error", err)
-		os.Exit(1)
-	}
-	jwtService, err := auth.NewJWTService(jwtSecret)
-	if err != nil {
-		log.Error("Failed to create JWT service", "error", err)
-		os.Exit(1)
-	}
-
-	// Initialize rate limiter
-	rateLimiter := auth.NewRateLimiter(auth.DefaultRateLimiterConfig())
-
-	// Initialize health checker
-	healthConfig := health.DefaultConfig("hls-api", log)
-	healthConfig.S3Client = s3Client
-	healthConfig.SQSClient = sqsClient
-	healthConfig.S3Bucket = cfg.AWS.RawBucket
-	healthConfig.SQSQueueURL = cfg.AWS.SQSQueueURL
-	healthChecker := health.NewChecker(healthConfig)
-
-	// Create and start server
-	server, err := api.NewServer(&api.ServerConfig{
-		Config:        cfg,
-		Logger:        log,
-		S3Client:      s3Client,
-		SQSClient:     sqsClient,
-		VideoRepo:     videoRepo,
-		JWTService:    jwtService,
-		RateLimiter:   rateLimiter,
-		HealthChecker: healthChecker,
+	// Create API handler
+	handler, err := api.NewHandler(&api.HandlerConfig{
+		S3Client:        s3Client,
+		SQSClient:       sqsClient,
+		DynamoDBClient:  dynamoClient,
+		RawBucket:       cfg.AWS.RawBucket,
+		ProcessedBucket: cfg.AWS.ProcessedBucket,
+		QueueURL:        cfg.AWS.SQSQueueURL,
+		TableName:       cfg.AWS.DynamoDBTable,
+		CDNDomain:       cfg.AWS.CDNDomain,
+		MaxUploadSize:   cfg.API.MaxUploadSize,
+		PresignExpiry:   cfg.API.PresignExpiry,
+		JWTSecret:       cfg.API.JWTSecret,
+		Logger:          logger,
 	})
 	if err != nil {
-		log.Error("Failed to create server", "error", err)
+		logger.Error("Failed to create API handler", "error", err)
 		os.Exit(1)
+	}
+
+	// Create router
+	r := chi.NewRouter()
+
+	// Middleware
+	r.Use(middleware.RequestID)
+	r.Use(middleware.RealIP)
+	r.Use(api.RequestLogger(logger))
+	r.Use(middleware.Recoverer)
+	r.Use(middleware.Timeout(60 * time.Second))
+
+	// CORS
+	r.Use(api.CORSMiddleware(cfg.CORS))
+
+	// Health endpoints (no auth)
+	r.Get("/health", handler.Health)
+	r.Get("/ready", handler.Ready)
+
+	// Metrics endpoint
+	r.Handle("/metrics", promhttp.Handler())
+
+	// API routes
+	r.Route("/api/v1", func(r chi.Router) {
+		// Public routes
+		r.Group(func(r chi.Router) {
+			r.Post("/auth/token", handler.GenerateToken)
+		})
+
+		// Protected routes
+		r.Group(func(r chi.Router) {
+			r.Use(api.JWTAuthMiddleware(cfg.API.JWTSecret))
+
+			// Video management
+			r.Route("/videos", func(r chi.Router) {
+				r.Get("/", handler.ListVideos)
+				r.Post("/", handler.CreateVideo)
+				r.Post("/upload", handler.InitiateUpload)
+				r.Post("/upload/multipart", handler.InitiateMultipartUpload)
+				r.Post("/upload/multipart/complete", handler.CompleteMultipartUpload)
+
+				r.Route("/{videoID}", func(r chi.Router) {
+					r.Get("/", handler.GetVideo)
+					r.Put("/", handler.UpdateVideo)
+					r.Delete("/", handler.DeleteVideo)
+					r.Get("/status", handler.GetVideoStatus)
+					r.Post("/reprocess", handler.ReprocessVideo)
+				})
+			})
+
+			// Stats
+			r.Get("/stats", handler.GetStats)
+		})
+	})
+
+	// Create server
+	addr := fmt.Sprintf(":%s", cfg.API.Port)
+	server := &http.Server{
+		Addr:         addr,
+		Handler:      r,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 
 	// Start server in goroutine
 	go func() {
-		if err := server.Start(); err != nil {
-			log.Error("Server error", "error", err)
+		logger.Info("API server listening", "addr", addr)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error("Server failed", "error", err)
+			os.Exit(1)
 		}
 	}()
 
-	// Wait for shutdown signal
+	// Wait for interrupt signal
 	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	// Graceful shutdown
-	ctx, cancel = context.WithTimeout(context.Background(), ShutdownTimeout)
+	logger.Info("Shutting down server...")
+
+	// Graceful shutdown with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	if err := server.Shutdown(ctx); err != nil {
-		log.Error("Server forced to shutdown", "error", err)
+		logger.Error("Server forced to shutdown", "error", err)
+		os.Exit(1)
 	}
 
-	log.Info("Server shutdown complete")
+	logger.Info("Server stopped")
 }
+
+func getLogLevel() slog.Level {
+	switch os.Getenv("LOG_LEVEL") {
+	case "debug":
+		return slog.LevelDebug
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
+func getEnv(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+

@@ -1,151 +1,68 @@
-terraform {
-  required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = ">= 5.0"
-    }
-  }
-}
+# Live Streaming Module - Main Configuration
+# This module sets up live streaming infrastructure with ECS, NLB,
+# and supporting resources for SRT/RTMP ingest and LL-HLS output.
 
-# Variables
-variable "environment" {
-  description = "Environment name"
-  type        = string
-}
-
-variable "vpc_id" {
-  description = "VPC ID"
-  type        = string
-}
-
-variable "subnet_ids" {
-  description = "Subnet IDs for the ECS service"
-  type        = list(string)
-}
-
-variable "cluster_id" {
-  description = "ECS cluster ID"
-  type        = string
-}
-
-variable "cluster_name" {
-  description = "ECS cluster name"
-  type        = string
-}
-
-variable "live_image" {
-  description = "Docker image for the live service"
-  type        = string
-}
-
-variable "mediamtx_image" {
-  description = "Docker image for MediaMTX"
-  type        = string
-  default     = "bluenviron/mediamtx:latest"
-}
-
-variable "output_bucket" {
-  description = "S3 bucket for live output"
-  type        = string
-}
-
-variable "output_bucket_arn" {
-  description = "ARN of the S3 output bucket"
-  type        = string
-}
-
-variable "cdn_domain" {
-  description = "CDN domain for output URLs"
-  type        = string
-  default     = ""
-}
-
-variable "cpu" {
-  description = "CPU units for the task"
-  type        = number
-  default     = 2048
-}
-
-variable "memory" {
-  description = "Memory (MB) for the task"
-  type        = number
-  default     = 4096
-}
-
-variable "desired_count" {
-  description = "Desired number of tasks"
-  type        = number
-  default     = 1
-}
-
-variable "srt_port_range_start" {
-  description = "Start of SRT port range"
-  type        = number
-  default     = 9000
-}
-
-variable "srt_port_range_end" {
-  description = "End of SRT port range"
-  type        = number
-  default     = 9100
-}
-
-variable "rtmp_port" {
-  description = "RTMP ingest port"
-  type        = number
-  default     = 1935
-}
-
-variable "api_port" {
-  description = "API port"
-  type        = number
-  default     = 8080
-}
-
-variable "enable_nlb" {
-  description = "Enable Network Load Balancer for SRT/RTMP"
-  type        = bool
-  default     = true
-}
-
-variable "tags" {
-  description = "Tags to apply to resources"
-  type        = map(string)
-  default     = {}
-}
-
-# Locals
 locals {
-  name_prefix = "hls-pipeline-live-${var.environment}"
+  name_prefix = "hls-pipeline-${var.environment}-live"
 }
 
-# IAM Role for ECS Task Execution
-resource "aws_iam_role" "task_execution" {
-  name = "${local.name_prefix}-task-execution"
+# Security Group
+resource "aws_security_group" "live" {
+  name        = "${local.name_prefix}-sg"
+  description = "Security group for live streaming service"
+  vpc_id      = var.vpc_id
 
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Action = "sts:AssumeRole"
-        Effect = "Allow"
-        Principal = {
-          Service = "ecs-tasks.amazonaws.com"
-        }
-      }
-    ]
+  # SRT ingest
+  ingress {
+    from_port   = 9998
+    to_port     = 9999
+    protocol    = "udp"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "SRT ingest"
+  }
+
+  # RTMP ingest
+  ingress {
+    from_port   = 1935
+    to_port     = 1935
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "RTMP ingest"
+  }
+
+  # Health check
+  ingress {
+    from_port   = 8080
+    to_port     = 8080
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "Health check"
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "Allow all outbound"
+  }
+
+  tags = merge(var.tags, {
+    Name = "${local.name_prefix}-sg"
   })
+}
+
+# CloudWatch Log Group
+resource "aws_cloudwatch_log_group" "live" {
+  name              = "/ecs/${local.name_prefix}"
+  retention_in_days = 30
 
   tags = var.tags
 }
 
-resource "aws_iam_role_policy_attachment" "task_execution" {
-  role       = aws_iam_role.task_execution.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
-}
+# IAM Role for Live Tasks
 
-# IAM Role for ECS Task
-resource "aws_iam_role" "task" {
+resource "aws_iam_role" "live_task" {
   name = "${local.name_prefix}-task"
 
   assume_role_policy = jsonencode({
@@ -164,9 +81,9 @@ resource "aws_iam_role" "task" {
   tags = var.tags
 }
 
-resource "aws_iam_role_policy" "task_s3" {
-  name = "${local.name_prefix}-s3"
-  role = aws_iam_role.task.id
+resource "aws_iam_role_policy" "live_task" {
+  name = "${local.name_prefix}-task-policy"
+  role = aws_iam_role.live_task.id
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -176,77 +93,33 @@ resource "aws_iam_role_policy" "task_s3" {
         Action = [
           "s3:PutObject",
           "s3:GetObject",
-          "s3:DeleteObject",
+          "s3:DeleteObject"
+        ]
+        Resource = "${var.output_bucket_arn}/*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
           "s3:ListBucket"
         ]
-        Resource = [
-          var.output_bucket_arn,
-          "${var.output_bucket_arn}/*"
+        Resource = var.output_bucket_arn
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "cloudwatch:PutMetricData"
         ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "xray:PutTraceSegments",
+          "xray:PutTelemetryRecords"
+        ]
+        Resource = "*"
       }
     ]
-  })
-}
-
-# CloudWatch Log Group
-resource "aws_cloudwatch_log_group" "live" {
-  name              = "/ecs/${local.name_prefix}"
-  retention_in_days = 30
-
-  tags = var.tags
-}
-
-# Security Group
-resource "aws_security_group" "live" {
-  name        = "${local.name_prefix}-sg"
-  description = "Security group for live streaming service"
-  vpc_id      = var.vpc_id
-
-  # API port
-  ingress {
-    from_port   = var.api_port
-    to_port     = var.api_port
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "API"
-  }
-
-  # RTMP port
-  ingress {
-    from_port   = var.rtmp_port
-    to_port     = var.rtmp_port
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "RTMP"
-  }
-
-  # SRT port range (UDP)
-  ingress {
-    from_port   = var.srt_port_range_start
-    to_port     = var.srt_port_range_end
-    protocol    = "udp"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "SRT"
-  }
-
-  # MediaMTX API
-  ingress {
-    from_port   = 9997
-    to_port     = 9997
-    protocol    = "tcp"
-    cidr_blocks = ["10.0.0.0/8"]
-    description = "MediaMTX API"
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = merge(var.tags, {
-    Name = "${local.name_prefix}-sg"
   })
 }
 
@@ -257,137 +130,41 @@ resource "aws_ecs_task_definition" "live" {
   network_mode             = "awsvpc"
   cpu                      = var.cpu
   memory                   = var.memory
-  execution_role_arn       = aws_iam_role.task_execution.arn
-  task_role_arn            = aws_iam_role.task.arn
+  execution_role_arn       = var.execution_role_arn
+  task_role_arn            = aws_iam_role.live_task.arn
 
   container_definitions = jsonencode([
-    # MediaMTX sidecar container
     {
-      name      = "mediamtx"
-      image     = var.mediamtx_image
-      essential = true
-      
+      name  = "live"
+      image = var.live_image
+
       portMappings = [
+        {
+          containerPort = 9998
+          hostPort      = 9998
+          protocol      = "udp"
+        },
+        {
+          containerPort = 9999
+          hostPort      = 9999
+          protocol      = "udp"
+        },
         {
           containerPort = 1935
           hostPort      = 1935
           protocol      = "tcp"
         },
         {
-          containerPort = 8554
-          hostPort      = 8554
-          protocol      = "tcp"
-        },
-        {
-          containerPort = 9997
-          hostPort      = 9997
+          containerPort = 8080
+          hostPort      = 8080
           protocol      = "tcp"
         }
       ]
 
       environment = [
-        {
-          name  = "MTX_PROTOCOLS"
-          value = "tcp,udp"
-        },
-        {
-          name  = "MTX_RTSPADDRESS"
-          value = ":8554"
-        },
-        {
-          name  = "MTX_RTMPADDRESS"
-          value = ":1935"
-        },
-        {
-          name  = "MTX_API"
-          value = "yes"
-        },
-        {
-          name  = "MTX_APIADDRESS"
-          value = ":9997"
-        }
-      ]
-
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          "awslogs-group"         = aws_cloudwatch_log_group.live.name
-          "awslogs-region"        = data.aws_region.current.name
-          "awslogs-stream-prefix" = "mediamtx"
-        }
-      }
-
-      healthCheck = {
-        command     = ["CMD-SHELL", "wget -q -O /dev/null http://localhost:9997/v3/paths/list || exit 1"]
-        interval    = 30
-        timeout     = 5
-        retries     = 3
-        startPeriod = 60
-      }
-    },
-    
-    # Live service container
-    {
-      name      = "live"
-      image     = var.live_image
-      essential = true
-      
-      portMappings = concat(
-        [
-          {
-            containerPort = var.api_port
-            hostPort      = var.api_port
-            protocol      = "tcp"
-          }
-        ],
-        # SRT ports
-        [for port in range(var.srt_port_range_start, var.srt_port_range_end + 1) : {
-          containerPort = port
-          hostPort      = port
-          protocol      = "udp"
-        }]
-      )
-
-      environment = [
-        {
-          name  = "PORT"
-          value = tostring(var.api_port)
-        },
-        {
-          name  = "AWS_REGION"
-          value = data.aws_region.current.name
-        },
-        {
-          name  = "OUTPUT_BUCKET"
-          value = var.output_bucket
-        },
-        {
-          name  = "CDN_DOMAIN"
-          value = var.cdn_domain
-        },
-        {
-          name  = "MEDIAMTX_URL"
-          value = "localhost"
-        },
-        {
-          name  = "MEDIAMTX_API_PORT"
-          value = "9997"
-        },
-        {
-          name  = "SRT_PORT_RANGE_START"
-          value = tostring(var.srt_port_range_start)
-        },
-        {
-          name  = "SRT_PORT_RANGE_END"
-          value = tostring(var.srt_port_range_end)
-        }
-      ]
-
-      dependsOn = [
-        {
-          containerName = "mediamtx"
-          condition     = "HEALTHY"
-        }
+        { name = "OUTPUT_BUCKET", value = var.output_bucket },
+        { name = "CDN_DOMAIN", value = var.cdn_domain },
+        { name = "ENVIRONMENT", value = var.environment },
       ]
 
       logConfiguration = {
@@ -400,109 +177,33 @@ resource "aws_ecs_task_definition" "live" {
       }
 
       healthCheck = {
-        command     = ["CMD-SHELL", "wget -q -O /dev/null http://localhost:${var.api_port}/health || exit 1"]
+        command     = ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
         interval    = 30
         timeout     = 5
         retries     = 3
-        startPeriod = 30
+        startPeriod = 60
       }
+
+      essential = true
     }
   ])
 
   tags = var.tags
 }
 
-# Network Load Balancer (for SRT/RTMP)
-resource "aws_lb" "live" {
-  count = var.enable_nlb ? 1 : 0
-
-  name               = "${local.name_prefix}-nlb"
-  internal           = false
-  load_balancer_type = "network"
-  subnets            = var.subnet_ids
-
-  enable_cross_zone_load_balancing = true
-
-  tags = var.tags
-}
-
-# NLB Target Groups
-resource "aws_lb_target_group" "rtmp" {
-  count = var.enable_nlb ? 1 : 0
-
-  name        = "${local.name_prefix}-rtmp"
-  port        = var.rtmp_port
-  protocol    = "TCP"
-  vpc_id      = var.vpc_id
-  target_type = "ip"
-
-  health_check {
-    enabled             = true
-    healthy_threshold   = 2
-    unhealthy_threshold = 2
-    interval            = 30
-    port                = var.api_port
-    protocol            = "TCP"
-  }
-
-  tags = var.tags
-}
-
-resource "aws_lb_target_group" "srt" {
-  count = var.enable_nlb ? 1 : 0
-
-  name        = "${local.name_prefix}-srt"
-  port        = var.srt_port_range_start
-  protocol    = "UDP"
-  vpc_id      = var.vpc_id
-  target_type = "ip"
-
-  health_check {
-    enabled             = true
-    healthy_threshold   = 2
-    unhealthy_threshold = 2
-    interval            = 30
-    port                = var.api_port
-    protocol            = "TCP"
-  }
-
-  tags = var.tags
-}
-
-# NLB Listeners
-resource "aws_lb_listener" "rtmp" {
-  count = var.enable_nlb ? 1 : 0
-
-  load_balancer_arn = aws_lb.live[0].arn
-  port              = var.rtmp_port
-  protocol          = "TCP"
-
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.rtmp[0].arn
-  }
-}
-
-resource "aws_lb_listener" "srt" {
-  count = var.enable_nlb ? 1 : 0
-
-  load_balancer_arn = aws_lb.live[0].arn
-  port              = var.srt_port_range_start
-  protocol          = "UDP"
-
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.srt[0].arn
-  }
-}
-
 # ECS Service
 resource "aws_ecs_service" "live" {
-  name            = local.name_prefix
-  cluster         = var.cluster_id
-  task_definition = aws_ecs_task_definition.live.arn
-  desired_count   = var.desired_count
-  launch_type     = "FARGATE"
+  name                               = local.name_prefix
+  cluster                            = var.cluster_id
+  task_definition                    = aws_ecs_task_definition.live.arn
+  desired_count                      = var.desired_count
+  deployment_minimum_healthy_percent = 100
+  deployment_maximum_percent         = 200
+
+  capacity_provider_strategy {
+    capacity_provider = "FARGATE"
+    weight            = 1
+  }
 
   network_configuration {
     subnets          = var.subnet_ids
@@ -513,45 +214,101 @@ resource "aws_ecs_service" "live" {
   dynamic "load_balancer" {
     for_each = var.enable_nlb ? [1] : []
     content {
-      target_group_arn = aws_lb_target_group.rtmp[0].arn
+      target_group_arn = aws_lb_target_group.srt[0].arn
       container_name   = "live"
-      container_port   = var.rtmp_port
+      container_port   = 9998
     }
   }
-
-  tags = var.tags
 
   lifecycle {
     ignore_changes = [desired_count]
   }
+
+  tags = var.tags
 }
 
-# Data sources
+# Network Load Balancer (Optional)
+resource "aws_lb" "live" {
+  count = var.enable_nlb ? 1 : 0
+
+  name               = "${local.name_prefix}-nlb"
+  internal           = false
+  load_balancer_type = "network"
+  subnets            = var.subnet_ids
+
+  enable_cross_zone_load_balancing = true
+
+  tags = merge(var.tags, {
+    Name = "${local.name_prefix}-nlb"
+  })
+}
+
+resource "aws_lb_target_group" "srt" {
+  count = var.enable_nlb ? 1 : 0
+
+  name        = "${local.name_prefix}-srt"
+  port        = 9998
+  protocol    = "UDP"
+  vpc_id      = var.vpc_id
+  target_type = "ip"
+
+  health_check {
+    protocol            = "TCP"
+    port                = 8080
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
+    interval            = 30
+  }
+
+  tags = var.tags
+}
+
+resource "aws_lb_listener" "srt" {
+  count = var.enable_nlb ? 1 : 0
+
+  load_balancer_arn = aws_lb.live[0].arn
+  port              = 9998
+  protocol          = "UDP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.srt[0].arn
+  }
+}
+
+resource "aws_lb_target_group" "rtmp" {
+  count = var.enable_nlb ? 1 : 0
+
+  name        = "${local.name_prefix}-rtmp"
+  port        = 1935
+  protocol    = "TCP"
+  vpc_id      = var.vpc_id
+  target_type = "ip"
+
+  health_check {
+    protocol            = "TCP"
+    port                = 8080
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
+    interval            = 30
+  }
+
+  tags = var.tags
+}
+
+resource "aws_lb_listener" "rtmp" {
+  count = var.enable_nlb ? 1 : 0
+
+  load_balancer_arn = aws_lb.live[0].arn
+  port              = 1935
+  protocol          = "TCP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.rtmp[0].arn
+  }
+}
+
+# Data Sources
 data "aws_region" "current" {}
-
-# Outputs
-output "service_name" {
-  description = "ECS service name"
-  value       = aws_ecs_service.live.name
-}
-
-output "security_group_id" {
-  description = "Security group ID"
-  value       = aws_security_group.live.id
-}
-
-output "nlb_dns_name" {
-  description = "NLB DNS name"
-  value       = var.enable_nlb ? aws_lb.live[0].dns_name : null
-}
-
-output "rtmp_url" {
-  description = "RTMP ingest URL"
-  value       = var.enable_nlb ? "rtmp://${aws_lb.live[0].dns_name}:${var.rtmp_port}/live" : null
-}
-
-output "srt_base_port" {
-  description = "Base SRT port"
-  value       = var.srt_port_range_start
-}
 

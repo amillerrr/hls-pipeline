@@ -15,6 +15,7 @@ environment = "dev"
 
 vpc_id     = "vpc-xxxxxxxx"
 subnet_ids = ["subnet-xxxxxxxx", "subnet-yyyyyyyy"]
+assign_public_ip = true             # Set to false if using NAT Gateway
 
 # =============================================================================
 # Storage Configuration
@@ -28,6 +29,7 @@ ads_bucket_name       = "hls-pipeline-dev-ads"
 # S3 lifecycle rules
 raw_bucket_expiration_days       = 7
 processed_bucket_expiration_days = 90
+cors_allowed_origins = ["*"]        # Restrict in production
 
 # =============================================================================
 # Transcoding Configuration
@@ -54,6 +56,10 @@ presets_file = ""
 cdn_enabled    = true
 cdn_domain     = ""  # Will be auto-generated if empty
 cdn_price_class = "PriceClass_100"  # US, Canada, Europe
+cdn_certificate_arn = ""            # Leave empty for CloudFront default cert
+cdn_geo_restriction_type = "none"   # or "whitelist", "blacklist"
+cdn_geo_restriction_locations = []  # e.g., ["US", "CA", "GB"]
+
 
 # Multi-CDN Configuration
 enable_multi_cdn = false
@@ -172,16 +178,18 @@ max_concurrent_jobs = 2
 # Queue Configuration
 # =============================================================================
 
-sqs_visibility_timeout_seconds   = 3600  # 1 hour
-sqs_message_retention_days       = 7
+sqs_visibility_timeout_seconds = 900  # 15 min (should be > max job time)
+sqs_message_retention_days       = 4
 sqs_receive_wait_time_seconds    = 20    # Long polling
 sqs_max_receive_count            = 3     # Before DLQ
+sqs_alarm_threshold            = 100  # Queue depth alarm
 
 # =============================================================================
 # Database Configuration
 # =============================================================================
 
-dynamodb_billing_mode = "PAY_PER_REQUEST"
+dynamodb_billing_mode = "PAY_PER_REQUEST" # or "PROVISIONED"
+dynamodb_ttl_enabled  = false
 
 # Only used if billing_mode is PROVISIONED
 dynamodb_read_capacity  = 5

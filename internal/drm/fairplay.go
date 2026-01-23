@@ -1,9 +1,11 @@
 package drm
 
 import (
+	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"encoding/base64"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,61 +14,111 @@ import (
 
 // FairPlayConfig contains FairPlay-specific configuration.
 type FairPlayConfig struct {
-	CertificateURL string `json:"certificateUrl"`
-	LicenseURL     string `json:"licenseUrl"`
-	KeyServerURL   string `json:"keyServerUrl"`
-	IV             string `json:"iv,omitempty"` // 16-byte hex string
+	LicenseURL  string `json:"licenseUrl"`  // Key Server Module (KSM) URL
+	Certificate string `json:"certificate"` // Base64 encoded FPS certificate
+	ASK         string `json:"ask"`         // Application Secret Key (hex)
 }
 
-// FairPlayKeyInfo contains FairPlay key information.
-type FairPlayKeyInfo struct {
-	KeyID         string `json:"keyId"`
-	Key           string `json:"key"`
-	IV            string `json:"iv"`
-	KeyURI        string `json:"keyUri"`
-	CertificateB64 string `json:"certificate,omitempty"`
+// FairPlayProvider implements FairPlay DRM key provisioning.
+type FairPlayProvider struct {
+	config      *FairPlayConfig
+	client      *http.Client
+	certificate []byte
+	ask         []byte
 }
 
-// FairPlayClient handles FairPlay DRM operations.
-type FairPlayClient struct {
-	config     *FairPlayConfig
-	httpClient *http.Client
-	certCache  []byte
-}
+// FairPlay HLS key format constants
+const (
+	FairPlayKeyFormat         = "com.apple.streamingkeydelivery"
+	FairPlayKeyFormatVersions = "1"
+)
 
-// NewFairPlayClient creates a new FairPlay client.
-func NewFairPlayClient(cfg *FairPlayConfig) *FairPlayClient {
-	return &FairPlayClient{
+// NewFairPlayProvider creates a new FairPlay provider.
+func NewFairPlayProvider(cfg *FairPlayConfig) (*FairPlayProvider, error) {
+	if cfg.LicenseURL == "" {
+		return nil, fmt.Errorf("FairPlay license URL is required")
+	}
+
+	provider := &FairPlayProvider{
 		config: cfg,
-		httpClient: &http.Client{
+		client: &http.Client{
 			Timeout: 30 * time.Second,
 		},
 	}
+
+	// Decode certificate if provided
+	if cfg.Certificate != "" {
+		cert, err := base64.StdEncoding.DecodeString(cfg.Certificate)
+		if err != nil {
+			return nil, fmt.Errorf("invalid FairPlay certificate: %w", err)
+		}
+		provider.certificate = cert
+	}
+
+	// Decode ASK if provided
+	if cfg.ASK != "" {
+		ask, err := hexDecode(cfg.ASK)
+		if err != nil {
+			return nil, fmt.Errorf("invalid FairPlay ASK: %w", err)
+		}
+		provider.ask = ask
+	}
+
+	return provider, nil
 }
 
-// FetchCertificate fetches the FairPlay Streaming certificate.
-func (c *FairPlayClient) FetchCertificate(ctx context.Context) ([]byte, error) {
-	if c.certCache != nil {
-		return c.certCache, nil
+// GetSystemConfig returns the FairPlay DRM system configuration.
+func (p *FairPlayProvider) GetSystemConfig(ctx context.Context, key *ContentKey) (*DRMSystemConfig, error) {
+	_, span := tracer.Start(ctx, "fairplay-get-system-config")
+	defer span.End()
+
+	// Generate the key URI for HLS playlist
+	keyURI := fmt.Sprintf("%s?kid=%s", p.config.LicenseURL, key.KeyID)
+
+	return &DRMSystemConfig{
+		System:            SystemFairPlay,
+		SystemID:          SystemIDFairPlay,
+		LicenseURL:        keyURI,
+		KeyFormat:         FairPlayKeyFormat,
+		KeyFormatVersions: FairPlayKeyFormatVersions,
+		Certificate:       p.config.Certificate,
+	}, nil
+}
+
+// GenerateHLSKeyTag generates the EXT-X-KEY tag for FairPlay in HLS playlists.
+func (p *FairPlayProvider) GenerateHLSKeyTag(key *ContentKey) string {
+	keyURI := fmt.Sprintf("%s?kid=%s", p.config.LicenseURL, key.KeyID)
+
+	return fmt.Sprintf(
+		`#EXT-X-KEY:METHOD=SAMPLE-AES,URI="%s",KEYFORMAT="%s",KEYFORMATVERSIONS="%s"`,
+		keyURI,
+		FairPlayKeyFormat,
+		FairPlayKeyFormatVersions,
+	)
+}
+
+// GetCertificate retrieves the FairPlay Streaming certificate.
+func (p *FairPlayProvider) GetCertificate(ctx context.Context) ([]byte, error) {
+	if p.certificate != nil {
+		return p.certificate, nil
 	}
 
-	if c.config.CertificateURL == "" {
-		return nil, fmt.Errorf("FairPlay certificate URL not configured")
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.config.CertificateURL, nil)
+	// If no cached certificate, fetch from URL
+	certURL := p.config.LicenseURL + "/cert"
+	
+	req, err := http.NewRequestWithContext(ctx, "GET", certURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create certificate request: %w", err)
+		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := p.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch certificate: %w", err)
+		return nil, fmt.Errorf("certificate request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("certificate fetch failed with status %d", resp.StatusCode)
+		return nil, fmt.Errorf("certificate request failed with status %d", resp.StatusCode)
 	}
 
 	cert, err := io.ReadAll(resp.Body)
@@ -74,149 +126,127 @@ func (c *FairPlayClient) FetchCertificate(ctx context.Context) ([]byte, error) {
 		return nil, fmt.Errorf("failed to read certificate: %w", err)
 	}
 
-	c.certCache = cert
+	p.certificate = cert
 	return cert, nil
 }
 
-// GenerateFairPlayKeyInfo generates FairPlay key information.
-func (c *FairPlayClient) GenerateFairPlayKeyInfo(keyID, key string) (*FairPlayKeyInfo, error) {
-	if err := ValidateKIDFormat(keyID); err != nil {
-		return nil, fmt.Errorf("invalid key ID: %w", err)
+// ProcessSPCRequest processes a Server Playback Context (SPC) request.
+func (p *FairPlayProvider) ProcessSPCRequest(ctx context.Context, spc []byte) ([]byte, error) {
+	ctx, span := tracer.Start(ctx, "fairplay-process-spc")
+	defer span.End()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", p.config.LicenseURL, bytes.NewReader(spc))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	if err := ValidateKeyFormat(key); err != nil {
+
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("SPC request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("SPC request failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	return io.ReadAll(resp.Body)
+}
+
+// EncryptContentKey encrypts a content key with the ASK for FairPlay.
+func (p *FairPlayProvider) EncryptContentKey(contentKey []byte) ([]byte, error) {
+	if len(p.ask) != 16 {
+		return nil, fmt.Errorf("invalid ASK length: expected 16 bytes, got %d", len(p.ask))
+	}
+
+	if len(contentKey) != 16 {
+		return nil, fmt.Errorf("invalid content key length: expected 16 bytes, got %d", len(contentKey))
+	}
+
+	block, err := aes.NewCipher(p.ask)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create cipher: %w", err)
+	}
+
+	// ECB mode encryption (FairPlay uses this for key wrapping)
+	encrypted := make([]byte, 16)
+	block.Encrypt(encrypted, contentKey)
+
+	return encrypted, nil
+}
+
+// GenerateCKCResponse generates a Content Key Context (CKC) response.
+// This is a simplified version - production would use proper FPS protocols.
+func (p *FairPlayProvider) GenerateCKCResponse(key *ContentKey) ([]byte, error) {
+	keyBytes, err := hexDecode(key.Key)
+	if err != nil {
 		return nil, fmt.Errorf("invalid key: %w", err)
 	}
 
-	// Generate or use configured IV
-	iv := c.config.IV
-	if iv == "" {
-		// Generate random IV (in production, use crypto/rand)
-		iv = generateDeterministicHex(keyID, "fairplay-iv", 16)
+	ivBytes, err := hexDecode(key.IV)
+	if err != nil {
+		return nil, fmt.Errorf("invalid IV: %w", err)
 	}
 
-	info := &FairPlayKeyInfo{
-		KeyID:  keyID,
-		Key:    key,
-		IV:     iv,
-		KeyURI: c.buildKeyURI(keyID),
-	}
+	// In production, this would generate a properly formatted CKC
+	// For now, return a simple structure
+	var ckc bytes.Buffer
+	ckc.Write(keyBytes)
+	ckc.Write(ivBytes)
 
-	return info, nil
+	return ckc.Bytes(), nil
 }
 
-// buildKeyURI builds the key URI for HLS playlists.
-func (c *FairPlayClient) buildKeyURI(keyID string) string {
-	if c.config.KeyServerURL != "" {
-		return fmt.Sprintf("%s?kid=%s", c.config.KeyServerURL, keyID)
+// DecryptSPC decrypts a Server Playback Context using the ASK.
+func (p *FairPlayProvider) DecryptSPC(spc []byte) ([]byte, error) {
+	if len(p.ask) != 16 {
+		return nil, fmt.Errorf("ASK not configured")
 	}
-	// Use skd:// URI scheme for FairPlay
-	return fmt.Sprintf("skd://%s", keyID)
+
+	block, err := aes.NewCipher(p.ask)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create cipher: %w", err)
+	}
+
+	// SPC is encrypted with CBC mode
+	if len(spc) < aes.BlockSize {
+		return nil, fmt.Errorf("SPC too short")
+	}
+
+	iv := spc[:aes.BlockSize]
+	ciphertext := spc[aes.BlockSize:]
+
+	if len(ciphertext)%aes.BlockSize != 0 {
+		return nil, fmt.Errorf("ciphertext is not a multiple of block size")
+	}
+
+	mode := cipher.NewCBCDecrypter(block, iv)
+	plaintext := make([]byte, len(ciphertext))
+	mode.CryptBlocks(plaintext, ciphertext)
+
+	// Remove PKCS7 padding
+	return removePKCS7Padding(plaintext)
 }
 
-// GenerateHLSKeyTag generates the EXT-X-KEY tag for FairPlay.
-func GenerateHLSKeyTag(keyInfo *FairPlayKeyInfo, method string) string {
-	if method == "" {
-		method = "SAMPLE-AES" // Default for FairPlay with CMAF
+func removePKCS7Padding(data []byte) ([]byte, error) {
+	if len(data) == 0 {
+		return nil, fmt.Errorf("empty data")
 	}
 
-	// Format IV as 0x-prefixed hex string
-	ivHex := keyInfo.IV
-	if len(ivHex) == 32 {
-		ivHex = "0x" + ivHex
+	padding := int(data[len(data)-1])
+	if padding > len(data) || padding > aes.BlockSize {
+		return nil, fmt.Errorf("invalid padding")
 	}
 
-	return fmt.Sprintf(
-		`#EXT-X-KEY:METHOD=%s,URI="%s",KEYFORMAT="com.apple.streamingkeydelivery",KEYFORMATVERSIONS="1",IV=%s`,
-		method,
-		keyInfo.KeyURI,
-		ivHex,
-	)
-}
-
-// GenerateHLSSessionKeyTag generates the EXT-X-SESSION-KEY tag for FairPlay.
-func GenerateHLSSessionKeyTag(keyInfo *FairPlayKeyInfo) string {
-	ivHex := "0x" + keyInfo.IV
-	
-	return fmt.Sprintf(
-		`#EXT-X-SESSION-KEY:METHOD=SAMPLE-AES,URI="%s",KEYFORMAT="com.apple.streamingkeydelivery",KEYFORMATVERSIONS="1",IV=%s`,
-		keyInfo.KeyURI,
-		ivHex,
-	)
-}
-
-// GetFairPlayPackagerArgs returns Shaka Packager arguments for FairPlay encryption.
-func GetFairPlayPackagerArgs(keyInfo *FairPlayKeyInfo) []string {
-	args := []string{
-		"--protection_scheme", "cbcs",
-		"--protection_systems", "FairPlay",
-		"--hls_key_uri", keyInfo.KeyURI,
-	}
-
-	if keyInfo.IV != "" {
-		args = append(args, "--hls_iv", keyInfo.IV)
-	}
-
-	return args
-}
-
-// FairPlayContentProtectionData generates the content protection data for HLS.
-func FairPlayContentProtectionData(keyID string) string {
-	// Convert key ID to base64 for HLS signaling
-	kidBytes, _ := hex.DecodeString(keyID)
-	return base64.StdEncoding.EncodeToString(kidBytes)
-}
-
-// ValidateFairPlayConfig validates FairPlay configuration.
-func ValidateFairPlayConfig(cfg *FairPlayConfig) error {
-	if cfg.KeyServerURL == "" && cfg.LicenseURL == "" {
-		return fmt.Errorf("either keyServerUrl or licenseUrl is required for FairPlay")
-	}
-
-	if cfg.IV != "" {
-		if len(cfg.IV) != 32 {
-			return fmt.Errorf("IV must be 32 hex characters (16 bytes)")
-		}
-		if err := ValidateKeyFormat(cfg.IV); err != nil {
-			return fmt.Errorf("invalid IV format: %w", err)
+	for i := len(data) - padding; i < len(data); i++ {
+		if data[i] != byte(padding) {
+			return nil, fmt.Errorf("invalid padding bytes")
 		}
 	}
 
-	return nil
-}
-
-// FairPlayEncryptionInfo contains all information needed for FairPlay encryption.
-type FairPlayEncryptionInfo struct {
-	KeyID          string `json:"keyId"`
-	Key            string `json:"key"`
-	IV             string `json:"iv"`
-	KeyURI         string `json:"keyUri"`
-	KeyFormat      string `json:"keyFormat"`
-	KeyFormatVersions string `json:"keyFormatVersions"`
-	Method         string `json:"method"`
-}
-
-// NewFairPlayEncryptionInfo creates FairPlay encryption info with defaults.
-func NewFairPlayEncryptionInfo(keyID, key, iv, keyURI string) *FairPlayEncryptionInfo {
-	return &FairPlayEncryptionInfo{
-		KeyID:             keyID,
-		Key:               key,
-		IV:                iv,
-		KeyURI:            keyURI,
-		KeyFormat:         "com.apple.streamingkeydelivery",
-		KeyFormatVersions: "1",
-		Method:            "SAMPLE-AES",
-	}
-}
-
-// ToHLSTag converts the encryption info to an HLS EXT-X-KEY tag.
-func (e *FairPlayEncryptionInfo) ToHLSTag() string {
-	return fmt.Sprintf(
-		`#EXT-X-KEY:METHOD=%s,URI="%s",KEYFORMAT="%s",KEYFORMATVERSIONS="%s",IV=0x%s`,
-		e.Method,
-		e.KeyURI,
-		e.KeyFormat,
-		e.KeyFormatVersions,
-		e.IV,
-	)
+	return data[:len(data)-padding], nil
 }
 

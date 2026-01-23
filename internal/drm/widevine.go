@@ -1,172 +1,182 @@
 package drm
 
 import (
+	"bytes"
+	"context"
 	"encoding/base64"
-	"encoding/binary"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"time"
 )
-
-// WidevinePSSHVersion is the PSSH box version for Widevine.
-const WidevinePSSHVersion = 0
 
 // WidevineConfig contains Widevine-specific configuration.
 type WidevineConfig struct {
 	LicenseURL string `json:"licenseUrl"`
-	Provider   string `json:"provider,omitempty"`
-	ContentID  string `json:"contentId,omitempty"`
-	Policy     string `json:"policy,omitempty"`
+	SignerKey  string `json:"signerKey"` // Base64 encoded
+	SignerIV   string `json:"signerIv"`  // Base64 encoded
+	Provider   string `json:"provider"`
+	ContentID  string `json:"contentId"`
 }
 
-// WidevinePSSHData contains the data for a Widevine PSSH box.
-type WidevinePSSHData struct {
-	Algorithm       int      `json:"algorithm,omitempty"`       // 1 = AES-CTR, 2 = AES-CBC
-	KeyIDs          [][]byte `json:"keyIds,omitempty"`
-	Provider        string   `json:"provider,omitempty"`
-	ContentID       []byte   `json:"contentId,omitempty"`
-	Policy          string   `json:"policy,omitempty"`
-	CryptoPeriodIndex uint32 `json:"cryptoPeriodIndex,omitempty"`
+// WidevineProvider implements Widevine DRM key provisioning.
+type WidevineProvider struct {
+	config *WidevineConfig
+	client *http.Client
 }
 
-// GenerateWidevinePSSH generates a Widevine PSSH box.
-func GenerateWidevinePSSH(keyID []byte, contentID string, provider string) (string, error) {
-	if len(keyID) != 16 {
-		return "", fmt.Errorf("key ID must be 16 bytes")
+// NewWidevineProvider creates a new Widevine provider.
+func NewWidevineProvider(cfg *WidevineConfig) (*WidevineProvider, error) {
+	if cfg.LicenseURL == "" {
+		return nil, fmt.Errorf("Widevine license URL is required")
 	}
 
-	// Build Widevine-specific data
-	// This is a simplified implementation - full implementation would use protobuf
-	psshData := buildWidevinePSSHData(keyID, contentID, provider)
-
-	// Build full PSSH box
-	psshBox := buildPSSHBox(SystemIDWidevine, psshData)
-
-	return base64.StdEncoding.EncodeToString(psshBox), nil
+	return &WidevineProvider{
+		config: cfg,
+		client: &http.Client{
+			Timeout: 30 * time.Second,
+		},
+	}, nil
 }
 
-// buildWidevinePSSHData builds the Widevine-specific PSSH data.
-func buildWidevinePSSHData(keyID []byte, contentID string, provider string) []byte {
-	// Simplified Widevine PSSH data structure
-	// In production, use google.golang.org/protobuf with Widevine's proto definition
-	
-	var data []byte
+// GetSystemConfig returns the Widevine DRM system configuration.
+func (p *WidevineProvider) GetSystemConfig(ctx context.Context, key *ContentKey) (*DRMSystemConfig, error) {
+	_, span := tracer.Start(ctx, "widevine-get-system-config")
+	defer span.End()
 
-	// Algorithm (field 1, varint) - AESCTR = 1
-	data = append(data, 0x08, 0x01)
-
-	// Key ID (field 2, bytes)
-	data = append(data, 0x12, byte(len(keyID)))
-	data = append(data, keyID...)
-
-	// Provider (field 3, string) - optional
-	if provider != "" {
-		data = append(data, 0x1a, byte(len(provider)))
-		data = append(data, []byte(provider)...)
+	// Generate PSSH box for Widevine
+	pssh, err := p.generatePSSH(key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate Widevine PSSH: %w", err)
 	}
 
-	// Content ID (field 4, bytes) - optional
-	if contentID != "" {
-		contentBytes := []byte(contentID)
-		data = append(data, 0x22, byte(len(contentBytes)))
-		data = append(data, contentBytes...)
-	}
-
-	return data
+	return &DRMSystemConfig{
+		System:     SystemWidevine,
+		SystemID:   SystemIDWidevine,
+		LicenseURL: p.config.LicenseURL,
+		PSSH:       pssh,
+	}, nil
 }
 
-// buildPSSHBox builds a PSSH box with the given system ID and data.
-func buildPSSHBox(systemID string, data []byte) []byte {
-	// Parse system ID (UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
-	systemIDBytes := parseUUID(systemID)
-
-	// PSSH box structure:
+// generatePSSH generates a Widevine PSSH box.
+func (p *WidevineProvider) generatePSSH(key *ContentKey) (string, error) {
+	// Widevine PSSH format:
 	// - 4 bytes: box size
-	// - 4 bytes: box type ('pssh')
-	// - 1 byte: version
+	// - 4 bytes: "pssh"
+	// - 1 byte: version (0 or 1)
 	// - 3 bytes: flags
 	// - 16 bytes: system ID
-	// - 4 bytes: data size (if version 1, also KID count and KIDs before this)
-	// - N bytes: data
+	// - 4 bytes: data size (version 0) or key ID count (version 1)
+	// - variable: data or key IDs
 
-	boxSize := 4 + 4 + 1 + 3 + 16 + 4 + len(data)
-	
-	box := make([]byte, boxSize)
-	offset := 0
+	keyIDBytes, err := hexDecode(key.KeyID)
+	if err != nil {
+		return "", fmt.Errorf("invalid key ID: %w", err)
+	}
 
-	// Box size (big-endian)
-	binary.BigEndian.PutUint32(box[offset:], uint32(boxSize))
-	offset += 4
+	// Simple PSSH with just the key ID
+	// This is a minimal PSSH - in production, you'd include provider-specific data
+	systemID, _ := hexDecode(NormalizeKeyID(SystemIDWidevine))
 
+	var pssh bytes.Buffer
+
+	// Version 1 PSSH with key ID
+	dataSize := 4 + 16 // 4 bytes key count + 16 bytes key ID
+	boxSize := 12 + 16 + 4 + dataSize
+
+	// Box size
+	writeUint32BE(&pssh, uint32(boxSize))
 	// Box type
-	copy(box[offset:], []byte("pssh"))
-	offset += 4
-
+	pssh.WriteString("pssh")
 	// Version and flags
-	box[offset] = WidevinePSSHVersion
-	offset += 4 // version (1) + flags (3)
-
+	pssh.WriteByte(1) // Version 1
+	pssh.Write([]byte{0, 0, 0}) // Flags
 	// System ID
-	copy(box[offset:], systemIDBytes)
-	offset += 16
+	pssh.Write(systemID)
+	// Key ID count
+	writeUint32BE(&pssh, 1)
+	// Key ID
+	pssh.Write(keyIDBytes)
+	// Data size (no extra data)
+	writeUint32BE(&pssh, 0)
 
-	// Data size
-	binary.BigEndian.PutUint32(box[offset:], uint32(len(data)))
-	offset += 4
-
-	// Data
-	copy(box[offset:], data)
-
-	return box
+	return base64.StdEncoding.EncodeToString(pssh.Bytes()), nil
 }
 
-// parseUUID parses a UUID string into bytes.
-func parseUUID(uuid string) []byte {
-	result := make([]byte, 16)
-	idx := 0
+// GetLicense makes a license request to the Widevine license server.
+func (p *WidevineProvider) GetLicense(ctx context.Context, request []byte) ([]byte, error) {
+	ctx, span := tracer.Start(ctx, "widevine-get-license")
+	defer span.End()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", p.config.LicenseURL, bytes.NewReader(request))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("license request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("license request failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	return io.ReadAll(resp.Body)
+}
+
+// WidevineLicenseRequest represents a Widevine license request.
+type WidevineLicenseRequest struct {
+	ContentID string `json:"content_id"`
+	Policy    string `json:"policy,omitempty"`
+	Tracks    []struct {
+		Type string `json:"type"`
+	} `json:"tracks,omitempty"`
+}
+
+// CreateLicenseRequest creates a Widevine license request for key provisioning.
+func (p *WidevineProvider) CreateLicenseRequest(contentID string) ([]byte, error) {
+	req := WidevineLicenseRequest{
+		ContentID: contentID,
+		Tracks: []struct {
+			Type string `json:"type"`
+		}{
+			{Type: "SD"},
+			{Type: "HD"},
+			{Type: "AUDIO"},
+		},
+	}
+
+	return json.Marshal(req)
+}
+
+// Helper functions
+
+func hexDecode(s string) ([]byte, error) {
+	// Handle both with and without dashes
+	s = NormalizeKeyID(s)
 	
-	for i := 0; i < len(uuid) && idx < 16; i++ {
-		c := uuid[i]
-		if c == '-' {
-			continue
+	result := make([]byte, len(s)/2)
+	for i := 0; i < len(s); i += 2 {
+		var b byte
+		_, err := fmt.Sscanf(s[i:i+2], "%02x", &b)
+		if err != nil {
+			return nil, err
 		}
-
-		var val byte
-		if c >= '0' && c <= '9' {
-			val = c - '0'
-		} else if c >= 'a' && c <= 'f' {
-			val = c - 'a' + 10
-		} else if c >= 'A' && c <= 'F' {
-			val = c - 'A' + 10
-		}
-
-		if i%2 == 0 || (i > 0 && uuid[i-1] == '-') {
-			result[idx] = val << 4
-		} else {
-			result[idx] |= val
-			idx++
-		}
+		result[i/2] = b
 	}
-
-	return result
+	return result, nil
 }
 
-// GetWidevineLicenseURL returns the license URL for Widevine.
-func GetWidevineLicenseURL(cfg *WidevineConfig) string {
-	if cfg.LicenseURL != "" {
-		return cfg.LicenseURL
-	}
-	// Default Widevine proxy URL (should be configured)
-	return ""
-}
-
-// WidevineContentProtection generates the DASH ContentProtection element for Widevine.
-func WidevineContentProtection(keyID string, pssh string) string {
-	return fmt.Sprintf(`<ContentProtection schemeIdUri="urn:uuid:%s" value="Widevine">
-  <cenc:pssh>%s</cenc:pssh>
-</ContentProtection>`, SystemIDWidevine, pssh)
-}
-
-// WidevineCencHeader generates the Widevine CENC header for DASH.
-func WidevineCencHeader(keyID string) string {
-	return fmt.Sprintf(`<ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="cenc" cenc:default_KID="%s"/>`, keyID)
+func writeUint32BE(buf *bytes.Buffer, v uint32) {
+	buf.WriteByte(byte(v >> 24))
+	buf.WriteByte(byte(v >> 16))
+	buf.WriteByte(byte(v >> 8))
+	buf.WriteByte(byte(v))
 }
 
