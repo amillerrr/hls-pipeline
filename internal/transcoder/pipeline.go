@@ -131,6 +131,16 @@ func (p *Pipeline) Process(ctx context.Context, input JobInput) error {
 		audioPipe, input.OutputDir, input.OutputDir, input.OutputDir,
 	))
 
+	// SSAI / SCTE-35 Support
+	// We attempt to map data streams (SCTE-35) if they exist.
+	// We use the optional map syntax '0:d?' so it doesn't fail if no data track exists.
+	// We copy it to all pipes (or just the first one) to ensure Shaka sees it.
+	// Since MPEG-TS supports SCTE-35, passing it through via -c:d copy works.
+	// NOTE: We only need to send it to ONE pipe for Shaka to pick it up if we configure Shaka correctly,
+	// but sending it to all video pipes is safer for stream matching.
+	// Here, we simply add it to the first video pipe.
+	mapArgs[len(mapArgs)-2] = mapArgs[len(mapArgs)-2] + " -map 0:d? -c:d copy" 
+
 	// Assemble final FFmpeg arguments
 	ffmpegArgs = append(ffmpegArgs, "-filter_complex", strings.Join(filterComplex, ";"))
 	ffmpegArgs = append(ffmpegArgs, mapArgs...)

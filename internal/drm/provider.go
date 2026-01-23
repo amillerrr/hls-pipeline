@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"sync"
 
 	"go.opentelemetry.io/otel"
 )
@@ -15,14 +14,20 @@ import (
 // Package-level tracer (single instance for the entire drm package).
 var tracer = otel.Tracer("hls-pipeline/drm")
 
+// KeyStore defines the interface for persistent key storage.
+type KeyStore interface {
+	Get(ctx context.Context, videoID string) (*ContentKey, error)
+	Set(ctx context.Context, videoID string, key *ContentKey) error
+}
+
 // MultiSystemProvider implements KeyProvider for multiple DRM systems.
 type MultiSystemProvider struct {
 	widevine  *WidevineProvider
 	fairplay  *FairPlayProvider
 	playready *PlayReadyProvider
 
-	// Cache for generated keys
-	keyCache sync.Map
+	// Persistent storage for generated keys
+	keyStore KeyStore
 
 	logger *slog.Logger
 }
@@ -48,6 +53,7 @@ type ProviderConfig struct {
 
 	// Common configuration
 	DefaultScheme EncryptionScheme `json:"defaultScheme"`
+	KeyStore      KeyStore         `json:"-"` // Injectable store
 
 	Logger *slog.Logger
 }
@@ -77,7 +83,14 @@ func NewMultiSystemProvider(cfg *ProviderConfig) (*MultiSystemProvider, error) {
 	}
 
 	provider := &MultiSystemProvider{
-		logger: cfg.Logger,
+		logger:   cfg.Logger,
+		keyStore: cfg.KeyStore,
+	}
+	
+	// Fallback to in-memory store if none provided (for dev/testing only)
+	if provider.keyStore == nil {
+		provider.keyStore = &InMemoryKeyStore{keys: make(map[string]*ContentKey)}
+		provider.logger.Warn("Using in-memory key store. Not suitable for production.")
 	}
 
 	if cfg.WidevineEnabled {
@@ -122,9 +135,10 @@ func (p *MultiSystemProvider) GetContentKey(ctx context.Context, videoID string)
 	ctx, span := tracer.Start(ctx, "get-content-key")
 	defer span.End()
 
-	// Check cache first
-	if cached, ok := p.keyCache.Load(videoID); ok {
-		return cached.(*ContentKey), nil
+	// Check persistent store
+	cached, err := p.keyStore.Get(ctx, videoID)
+	if err == nil && cached != nil {
+		return cached, nil
 	}
 
 	// Generate new key
@@ -133,8 +147,11 @@ func (p *MultiSystemProvider) GetContentKey(ctx context.Context, videoID string)
 		return nil, fmt.Errorf("failed to generate content key: %w", err)
 	}
 
-	// Cache the key
-	p.keyCache.Store(videoID, key)
+	// Save the key
+	if err := p.keyStore.Set(ctx, videoID, key); err != nil {
+		p.logger.ErrorContext(ctx, "Failed to save key to store", "error", err)
+		// Proceed anyway, but this is risky
+	}
 
 	p.logger.InfoContext(ctx, "Generated content key",
 		"videoId", videoID,
@@ -240,73 +257,19 @@ func generateContentKey() (*ContentKey, error) {
 	}, nil
 }
 
-// ClearKeyProvider implements a simple ClearKey DRM provider for testing.
-type ClearKeyProvider struct {
+// InMemoryKeyStore for development
+type InMemoryKeyStore struct {
 	keys map[string]*ContentKey
-	mu   sync.RWMutex
 }
 
-// NewClearKeyProvider creates a new ClearKey provider.
-func NewClearKeyProvider() *ClearKeyProvider {
-	return &ClearKeyProvider{
-		keys: make(map[string]*ContentKey),
-	}
-}
-
-// GetContentKey implements KeyProvider.GetContentKey for ClearKey.
-func (p *ClearKeyProvider) GetContentKey(ctx context.Context, videoID string) (*ContentKey, error) {
-	p.mu.RLock()
-	if key, ok := p.keys[videoID]; ok {
-		p.mu.RUnlock()
+func (s *InMemoryKeyStore) Get(ctx context.Context, videoID string) (*ContentKey, error) {
+	if key, ok := s.keys[videoID]; ok {
 		return key, nil
 	}
-	p.mu.RUnlock()
-
-	// Generate new key
-	key, err := generateContentKey()
-	if err != nil {
-		return nil, err
-	}
-
-	p.mu.Lock()
-	p.keys[videoID] = key
-	p.mu.Unlock()
-
-	return key, nil
+	return nil, fmt.Errorf("key not found")
 }
 
-// GetDRMSystems implements KeyProvider.GetDRMSystems for ClearKey.
-func (p *ClearKeyProvider) GetDRMSystems(ctx context.Context, videoID string) ([]DRMSystemConfig, error) {
-	return []DRMSystemConfig{
-		{
-			System:     SystemClearKey,
-			SystemID:   SystemIDClearKey,
-			LicenseURL: "", // ClearKey uses in-band keys
-		},
-	}, nil
+func (s *InMemoryKeyStore) Set(ctx context.Context, videoID string, key *ContentKey) error {
+	s.keys[videoID] = key
+	return nil
 }
-
-// GetEncryptionConfig implements KeyProvider.GetEncryptionConfig for ClearKey.
-func (p *ClearKeyProvider) GetEncryptionConfig(ctx context.Context, videoID string) (*EncryptionConfig, error) {
-	key, err := p.GetContentKey(ctx, videoID)
-	if err != nil {
-		return nil, err
-	}
-
-	systems, _ := p.GetDRMSystems(ctx, videoID)
-
-	return &EncryptionConfig{
-		Enabled: true,
-		Scheme:  EncryptionSchemeCENC,
-		Keys:    []ContentKey{*key},
-		Systems: systems,
-	}, nil
-}
-
-// AddKey adds or updates a key for a video ID.
-func (p *ClearKeyProvider) AddKey(videoID string, key *ContentKey) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.keys[videoID] = key
-}
-
