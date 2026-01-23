@@ -1,4 +1,3 @@
-// Package transcoder provides video transcoding functionality for the HLS pipeline.
 package transcoder
 
 import (

@@ -11,7 +11,6 @@ import (
 )
 
 // PresetConfig defines video encoding parameters for a quality level.
-// This is the SINGLE SOURCE OF TRUTH for all preset definitions.
 type PresetConfig struct {
 	Name         string  `json:"name" yaml:"name"`
 	Width        int     `json:"width" yaml:"width"`
@@ -293,3 +292,4 @@ func (p *PresetConfig) CodecString() string {
 func (p *PresetConfig) VideoCodecString() string {
 	return fmt.Sprintf("avc1.%s", GetAVCCodecString(p.Profile, p.Level))
 }
+

@@ -438,3 +438,4 @@ func parseTimeSignal(cmd *SCTE35Command, data []byte) error {
 func (b *BreakDuration) GetBreakDurationSeconds() float64 {
 	return float64(b.Duration) / 90000.0
 }
+

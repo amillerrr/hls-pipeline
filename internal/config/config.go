@@ -101,15 +101,15 @@ type DRMConfig struct {
 
 // SSAIConfig holds server-side ad insertion configuration.
 type SSAIConfig struct {
-	Enabled                  bool
-	AdDecisionServerURL      string
-	PrerollAdServerURL       string
-	SlateAdURL               string
+	Enabled                 bool
+	AdDecisionServerURL     string
+	PrerollAdServerURL      string
+	SlateAdURL              string
 	PersonalizationThreshold int
-	MaxAdDuration            int
-	MediaTailorConfigName    string
-	EnableSCTE35Passthrough  bool
-	PreserveSCTE35Markers    bool
+	MaxAdDuration           int
+	MediaTailorConfigName   string
+	EnableSCTE35Passthrough bool
+	PreserveSCTE35Markers   bool
 }
 
 // ObservabilityConfig holds observability configuration.
@@ -203,15 +203,15 @@ func Load() (*Config, error) {
 			KeyRotationPeriod:   getEnvDuration("KEY_ROTATION_PERIOD", 24*time.Hour),
 		},
 		SSAI: SSAIConfig{
-			Enabled:                  getEnvBool("ENABLE_SSAI", false),
-			AdDecisionServerURL:      os.Getenv("AD_DECISION_SERVER_URL"),
-			PrerollAdServerURL:       os.Getenv("PREROLL_AD_SERVER_URL"),
-			SlateAdURL:               os.Getenv("SLATE_AD_URL"),
+			Enabled:                 getEnvBool("ENABLE_SSAI", false),
+			AdDecisionServerURL:     os.Getenv("AD_DECISION_SERVER_URL"),
+			PrerollAdServerURL:      os.Getenv("PREROLL_AD_SERVER_URL"),
+			SlateAdURL:              os.Getenv("SLATE_AD_URL"),
 			PersonalizationThreshold: getEnvInt("PERSONALIZATION_THRESHOLD", 100),
-			MaxAdDuration:            getEnvInt("MAX_AD_DURATION", 120),
-			MediaTailorConfigName:    os.Getenv("MEDIATAILOR_CONFIG_NAME"),
-			EnableSCTE35Passthrough:  getEnvBool("ENABLE_SCTE35_PASSTHROUGH", true),
-			PreserveSCTE35Markers:    getEnvBool("PRESERVE_SCTE35_MARKERS", true),
+			MaxAdDuration:           getEnvInt("MAX_AD_DURATION", 120),
+			MediaTailorConfigName:   os.Getenv("MEDIATAILOR_CONFIG_NAME"),
+			EnableSCTE35Passthrough: getEnvBool("ENABLE_SCTE35_PASSTHROUGH", true),
+			PreserveSCTE35Markers:   getEnvBool("PRESERVE_SCTE35_MARKERS", true),
 		},
 		Observability: ObservabilityConfig{
 			OTLPEndpoint:    getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", DefaultOTLPEndpoint),
@@ -432,3 +432,4 @@ func parseCDNProviders() []CDNProviderConfig {
 
 	return providers
 }
+

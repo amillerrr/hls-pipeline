@@ -169,3 +169,4 @@ func WidevineContentProtection(keyID string, pssh string) string {
 func WidevineCencHeader(keyID string) string {
 	return fmt.Sprintf(`<ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="cenc" cenc:default_KID="%s"/>`, keyID)
 }
+

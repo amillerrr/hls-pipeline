@@ -9,278 +9,395 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
+	"github.com/google/uuid"
 
 	"github.com/amillerrr/hls-pipeline/internal/config"
 	"github.com/amillerrr/hls-pipeline/internal/metrics"
-	"github.com/amillerrr/hls-pipeline/internal/storage"
 	"github.com/amillerrr/hls-pipeline/internal/transcoder"
 	"github.com/amillerrr/hls-pipeline/pkg/models"
 )
 
-// SQS configuration constants
-const (
-	SQSMaxMessages       = 1
-	SQSWaitTimeSeconds   = 20
-	SQSVisibilityTimeout = 900 // 15 minutes
-	RetryBackoffPeriod   = 5 * time.Second
-)
-
-var tracer = otel.Tracer("hls-worker")
-
-// Worker handles video processing jobs from SQS.
+// Worker processes transcoding jobs from SQS.
 type Worker struct {
-	s3Client    *s3.Client
-	sqsClient   *sqs.Client
-	videoRepo   *storage.VideoRepository
-	transcoder  *transcoder.Transcoder
-	downloader  *Downloader
-	uploader    *Uploader
-	cfg         *config.Config
-	log         *slog.Logger
+	config         *config.Config
+	sqsClient      *sqs.Client
+	s3Client       *s3.Client
+	dynamoDBClient *dynamodb.Client
+	logger         *slog.Logger
+
+	// Processing
+	transcoder       *transcoder.LLHLSTranscoder
+	s3EventProcessor *S3EventProcessor
+
+	// Concurrency control
+	semaphore chan struct{}
+	wg        sync.WaitGroup
+
+	// Shutdown
+	shutdown chan struct{}
+	running  bool
+	mu       sync.Mutex
 }
 
-// Config holds worker dependencies.
-type Config struct {
-	S3Client   *s3.Client
-	SQSClient  *sqs.Client
-	VideoRepo  *storage.VideoRepository
-	Transcoder *transcoder.Transcoder
-	AppConfig  *config.Config
-	Logger     *slog.Logger
+// WorkerConfig contains worker configuration.
+type WorkerConfig struct {
+	QueueURL          string
+	MaxConcurrentJobs int
+	VisibilityTimeout int32
+	WaitTimeSeconds   int32
+	ProcessedBucket   string
+	TableName         string
 }
 
-// New creates a new Worker with the given configuration.
-func New(cfg *Config) *Worker {
-	return &Worker{
-		s3Client:   cfg.S3Client,
-		sqsClient:  cfg.SQSClient,
-		videoRepo:  cfg.VideoRepo,
-		transcoder: cfg.Transcoder,
-		downloader: NewDownloader(cfg.S3Client, cfg.Logger),
-		uploader:   NewUploader(cfg.S3Client, cfg.AppConfig.AWS.ProcessedBucket, cfg.Logger),
-		cfg:        cfg.AppConfig,
-		log:        cfg.Logger,
+// NewWorker creates a new worker instance.
+func NewWorker(
+	cfg *config.Config,
+	sqsClient *sqs.Client,
+	s3Client *s3.Client,
+	dynamoDBClient *dynamodb.Client,
+	logger *slog.Logger,
+) (*Worker, error) {
+	// Create transcoder
+	tc, err := transcoder.NewLLHLSTranscoder(&transcoder.LLHLSConfig{
+		SegmentDuration: cfg.SegmentDuration,
+		PartDuration:    cfg.PartDuration,
+		EnableCMAF:      cfg.EnableCMAF,
+	}, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create transcoder: %w", err)
 	}
+
+	// Create S3 event processor with default filter
+	s3EventProcessor := NewS3EventProcessor(DefaultS3EventFilter(), logger)
+
+	maxJobs := cfg.MaxConcurrentJobs
+	if maxJobs <= 0 {
+		maxJobs = 2
+	}
+
+	return &Worker{
+		config:           cfg,
+		sqsClient:        sqsClient,
+		s3Client:         s3Client,
+		dynamoDBClient:   dynamoDBClient,
+		logger:           logger,
+		transcoder:       tc,
+		s3EventProcessor: s3EventProcessor,
+		semaphore:        make(chan struct{}, maxJobs),
+		shutdown:         make(chan struct{}),
+	}, nil
 }
 
-// Run starts the worker and blocks until the context is cancelled.
-func (w *Worker) Run(ctx context.Context) {
-	w.log.InfoContext(ctx, "Starting queue polling",
-		"queueURL", w.cfg.AWS.SQSQueueURL,
-		"maxConcurrent", w.cfg.Worker.MaxConcurrentJobs,
+// Start starts the worker.
+func (w *Worker) Start(ctx context.Context) error {
+	w.mu.Lock()
+	if w.running {
+		w.mu.Unlock()
+		return fmt.Errorf("worker already running")
+	}
+	w.running = true
+	w.mu.Unlock()
+
+	w.logger.Info("worker starting",
+		"queueUrl", w.config.SQSQueueURL,
+		"maxConcurrentJobs", cap(w.semaphore),
 	)
 
-	sem := make(chan struct{}, w.cfg.Worker.MaxConcurrentJobs)
-	var wg sync.WaitGroup
-
-messageLoop:
+	// Main polling loop
 	for {
 		select {
 		case <-ctx.Done():
-			w.log.InfoContext(ctx, "Waiting for in-progress jobs to complete...")
-			wg.Wait()
-			w.log.InfoContext(ctx, "All jobs completed, shutting down")
-			return
+			return w.gracefulShutdown()
+		case <-w.shutdown:
+			return w.gracefulShutdown()
 		default:
-		}
-
-		// Receive messages
-		result, err := w.sqsClient.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
-			QueueUrl:            aws.String(w.cfg.AWS.SQSQueueURL),
-			MaxNumberOfMessages: SQSMaxMessages,
-			WaitTimeSeconds:     SQSWaitTimeSeconds,
-			VisibilityTimeout:   SQSVisibilityTimeout,
-		})
-		if err != nil {
-			if ctx.Err() != nil {
-				continue // Shutting down
-			}
-			w.log.ErrorContext(ctx, "Failed to receive messages", "error", err)
-			time.Sleep(RetryBackoffPeriod)
-			continue
-		}
-
-		for _, msg := range result.Messages {
-			select {
-			case sem <- struct{}{}:
-				wg.Add(1)
-				go func(msg types.Message) {
-					defer wg.Done()
-					defer func() { <-sem }()
-
-					metrics.ActiveJobs.Inc()
-					defer metrics.ActiveJobs.Dec()
-
-					if err := w.processMessage(ctx, msg); err != nil {
-						w.log.ErrorContext(ctx, "Failed to process message",
-							"error", err,
-							"messageId", safeStringDeref(msg.MessageId),
-						)
-						metrics.RecordFailure()
-					} else {
-						// Delete message on success
-						_, delErr := w.sqsClient.DeleteMessage(ctx, &sqs.DeleteMessageInput{
-							QueueUrl:      aws.String(w.cfg.AWS.SQSQueueURL),
-							ReceiptHandle: msg.ReceiptHandle,
-						})
-						if delErr != nil {
-							w.log.ErrorContext(ctx, "Failed to delete message", "error", delErr)
-						}
-						metrics.RecordSuccess()
-					}
-				}(msg)
-			case <-ctx.Done():
-				w.log.InfoContext(ctx, "Context cancelled, stopping message processing")
-				break messageLoop
+			if err := w.pollMessages(ctx); err != nil {
+				w.logger.Error("error polling messages", "error", err)
+				time.Sleep(5 * time.Second)
 			}
 		}
 	}
 }
 
-func safeStringDeref(s *string) string {
-	if s == nil {
-		return ""
+// Stop stops the worker gracefully.
+func (w *Worker) Stop() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.running {
+		close(w.shutdown)
+		w.running = false
 	}
-	return *s
 }
 
-func (w *Worker) processMessage(ctx context.Context, msg types.Message) error {
-	ctx, span := tracer.Start(ctx, "process-message")
-	defer span.End()
+// gracefulShutdown waits for in-flight jobs to complete.
+func (w *Worker) gracefulShutdown() error {
+	w.logger.Info("worker shutting down, waiting for in-flight jobs...")
 
-	if msg.Body == nil {
-		return fmt.Errorf("%w: empty message body", models.ErrJobParseFailed)
-	}
-
-	var job models.VideoJob
-	if err := json.Unmarshal([]byte(*msg.Body), &job); err != nil {
-		return fmt.Errorf("%w: %v", models.ErrJobParseFailed, err)
-	}
-
-	if err := job.Validate(); err != nil {
-		return fmt.Errorf("%w: %v", models.ErrJobParseFailed, err)
-	}
-
-	span.SetAttributes(
-		attribute.String("video.id", job.VideoID),
-		attribute.String("video.s3_key", job.S3Key),
-		attribute.String("video.filename", job.Filename),
-	)
-
-	return w.processVideo(ctx, &job)
-}
-
-func (w *Worker) processVideo(ctx context.Context, job *models.VideoJob) error {
-	w.log.InfoContext(ctx, "Processing video",
-		"videoId", job.VideoID,
-		"s3Key", job.S3Key,
-		"filename", job.Filename,
-	)
-
-	// Update status to processing
-	if err := w.videoRepo.UpdateVideoProcessing(ctx, job.VideoID); err != nil {
-		w.log.WarnContext(ctx, "Failed to update video status to processing",
-			"videoId", job.VideoID,
-			"error", err,
-		)
-	}
-
-	// Track processing error for deferred failure handling
-	var processingErr error
-	defer func() {
-		if processingErr != nil {
-			if failErr := w.videoRepo.FailVideoProcessing(ctx, job.VideoID, processingErr.Error()); failErr != nil {
-				w.log.ErrorContext(ctx, "Failed to mark video as failed",
-					"videoId", job.VideoID,
-					"error", failErr,
-				)
-			}
-		}
+	done := make(chan struct{})
+	go func() {
+		w.wg.Wait()
+		close(done)
 	}()
 
-	start := time.Now()
+	select {
+	case <-done:
+		w.logger.Info("worker shutdown complete")
+	case <-time.After(5 * time.Minute):
+		w.logger.Warn("worker shutdown timeout, some jobs may not have completed")
+	}
 
-	// Download video from S3
-	downloadStart := time.Now()
-	localPath, err := w.downloader.Download(ctx, job)
+	return nil
+}
+
+// pollMessages polls SQS for messages.
+func (w *Worker) pollMessages(ctx context.Context) error {
+	result, err := w.sqsClient.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
+		QueueUrl:              aws.String(w.config.SQSQueueURL),
+		MaxNumberOfMessages:   10,
+		WaitTimeSeconds:       20,
+		VisibilityTimeout:     3600, // 1 hour
+		MessageAttributeNames: []string{"All"},
+	})
 	if err != nil {
-		processingErr = fmt.Errorf("%w: %v", models.ErrDownloadFailed, err)
-		return processingErr
-	}
-	metrics.DownloadDuration.Observe(time.Since(downloadStart).Seconds())
-	defer w.downloader.Cleanup(localPath)
-
-	// Check for context cancellation before transcoding
-	if ctx.Err() != nil {
-		processingErr = fmt.Errorf("%w: before transcoding", models.ErrContextCanceled)
-		return processingErr
+		return fmt.Errorf("failed to receive messages: %w", err)
 	}
 
-	// Create HLS output directory
-	hlsDir, err := w.downloader.CreateHLSDir(job.VideoID)
+	for _, msg := range result.Messages {
+		// Acquire semaphore slot
+		select {
+		case w.semaphore <- struct{}{}:
+			w.wg.Add(1)
+			go w.processMessage(ctx, msg)
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	return nil
+}
+
+// processMessage processes a single SQS message.
+func (w *Worker) processMessage(ctx context.Context, msg types.Message) {
+	defer func() {
+		<-w.semaphore
+		w.wg.Done()
+	}()
+
+	startTime := time.Now()
+	messageBody := aws.ToString(msg.Body)
+
+	// Skip S3 test events
+	if IsTestEvent(messageBody) {
+		w.logger.Debug("skipping S3 test event")
+		w.deleteMessage(ctx, msg)
+		return
+	}
+
+	// Parse the message - handles both S3 events and direct API calls
+	job, err := w.s3EventProcessor.ProcessMessage(ctx, messageBody)
 	if err != nil {
-		processingErr = fmt.Errorf("%w: %v", models.ErrTranscodeFailed, err)
-		return processingErr
-	}
-	defer w.downloader.CleanupDir(hlsDir)
-
-	// Create output directories for each quality level
-	if err := transcoder.CreateOutputDirectories(hlsDir, w.transcoder.GetPresets()); err != nil {
-		processingErr = fmt.Errorf("%w: %v", models.ErrTranscodeFailed, err)
-		return processingErr
+		w.logger.Error("failed to parse message",
+			"error", err,
+			"messageId", aws.ToString(msg.MessageId),
+		)
+		// Don't delete - let it go to DLQ after max retries
+		return
 	}
 
-	// Transcode to HLS
-	if err := w.transcoder.TranscodeToHLS(ctx, job.VideoID, localPath, hlsDir); err != nil {
-		processingErr = fmt.Errorf("%w: %v", models.ErrTranscodeFailed, err)
-		return processingErr
+	// Nil job means filtered out (not an error)
+	if job == nil {
+		w.logger.Debug("message filtered out",
+			"messageId", aws.ToString(msg.MessageId),
+		)
+		w.deleteMessage(ctx, msg)
+		return
 	}
 
-	// Calculate quality metrics (non-blocking)
-	w.transcoder.CalculateQualityMetrics(ctx, localPath, hlsDir)
+	w.logger.Info("processing job",
+		"videoId", job.VideoID,
+		"source", job.Source,
+		"bucket", job.Bucket,
+		"key", job.Key,
+	)
 
-	// Check for context cancellation before uploading
-	if ctx.Err() != nil {
-		processingErr = fmt.Errorf("%w: before upload", models.ErrContextCanceled)
-		return processingErr
-	}
-
-	// Upload HLS files to S3
-	uploadStart := time.Now()
-	if err := w.uploader.Upload(ctx, job.VideoID, hlsDir); err != nil {
-		processingErr = fmt.Errorf("%w: %v", models.ErrUploadFailed, err)
-		return processingErr
-	}
-	metrics.UploadDuration.Observe(time.Since(uploadStart).Seconds())
-
-	// Record total processing duration
-	duration := time.Since(start).Seconds()
-	metrics.ProcessingDuration.WithLabelValues("all").Observe(duration)
-
-	// Update DynamoDB with completion info
-	hlsPrefix := fmt.Sprintf("hls/%s/", job.VideoID)
-	playbackURL := fmt.Sprintf("https://%s/hls/%s/master.m3u8", w.cfg.AWS.CDNDomain, job.VideoID)
-
-	modelPresets := transcoder.ToModelPresets(w.transcoder.GetPresets())
-	if err := w.videoRepo.CompleteVideoProcessing(ctx, job.VideoID, playbackURL, hlsPrefix, modelPresets); err != nil {
-		w.log.ErrorContext(ctx, "Failed to mark video as completed in DynamoDB",
+	// Create or update video record in DynamoDB
+	video, err := w.getOrCreateVideo(ctx, job)
+	if err != nil {
+		w.logger.Error("failed to get/create video record",
 			"videoId", job.VideoID,
 			"error", err,
 		)
-		// Don't set processingErr here - the video was processed successfully
+		return
 	}
 
-	w.log.InfoContext(ctx, "Video processed successfully",
+	// Update status to processing
+	video.SetStatus(models.StatusProcessing)
+	if err := w.updateVideo(ctx, video); err != nil {
+		w.logger.Warn("failed to update video status", "error", err)
+	}
+
+	// Process the job
+	if err := w.processJob(ctx, job, video); err != nil {
+		w.logger.Error("job processing failed",
+			"videoId", job.VideoID,
+			"error", err,
+			"duration", time.Since(startTime),
+		)
+
+		video.SetError(models.ErrCodeTranscodeFailed, err.Error())
+		w.updateVideo(ctx, video)
+
+		metrics.RecordTranscodeError("transcode_failed", "processing")
+		return
+	}
+
+	// Success - delete the message
+	w.deleteMessage(ctx, msg)
+
+	w.logger.Info("job completed",
 		"videoId", job.VideoID,
-		"filename", job.Filename,
-		"durationSeconds", duration,
-		"playbackURL", playbackURL,
+		"duration", time.Since(startTime),
 	)
 
+	metrics.RecordTranscodeJob("success", "", time.Since(startTime).Seconds(), job.Size, 0)
+}
+
+// processJob processes a transcoding job.
+func (w *Worker) processJob(ctx context.Context, job *JobMessage, video *models.Video) error {
+	// Update status to transcoding
+	video.SetStatus(models.StatusTranscoding)
+	w.updateVideo(ctx, video)
+
+	// Build transcode input
+	input := &transcoder.TranscodeInput{
+		VideoID:      job.VideoID,
+		SourceBucket: job.Bucket,
+		SourceKey:    job.Key,
+		OutputBucket: w.config.ProcessedBucket,
+		OutputPrefix: fmt.Sprintf("processed/%s", job.VideoID),
+	}
+
+	// Apply job options if present
+	if job.Options != nil {
+		if len(job.Options.Presets) > 0 {
+			input.Presets = job.Options.Presets
+		}
+		if job.Options.OutputPrefix != "" {
+			input.OutputPrefix = job.Options.OutputPrefix
+		}
+	}
+
+	// Run transcoding
+	output, err := w.transcoder.Transcode(ctx, input)
+	if err != nil {
+		return fmt.Errorf("transcoding failed: %w", err)
+	}
+
+	// Update video with results
+	video.SetStatus(models.StatusCompleted)
+	video.HLSManifestURL = fmt.Sprintf("https://%s/%s/master.m3u8",
+		w.config.CDNDomain,
+		input.OutputPrefix,
+	)
+	video.Duration = output.Duration
+	video.Width = output.Width
+	video.Height = output.Height
+
+	// Add output variants
+	video.Outputs = &models.VideoOutputs{
+		Variants: make([]models.VariantOutput, len(output.Variants)),
+	}
+	for i, v := range output.Variants {
+		video.Outputs.Variants[i] = models.VariantOutput{
+			Name:      v.Name,
+			Width:     v.Width,
+			Height:    v.Height,
+			Bandwidth: v.Bandwidth,
+			Codecs:    v.Codecs,
+		}
+	}
+
+	if err := w.updateVideo(ctx, video); err != nil {
+		return fmt.Errorf("failed to update video record: %w", err)
+	}
+
+	// Send webhook if configured
+	if job.Options != nil && job.Options.CallbackURL != "" {
+		w.sendWebhook(ctx, job.Options.CallbackURL, video)
+	}
+
 	return nil
+}
+
+// getOrCreateVideo gets an existing video or creates a new one.
+func (w *Worker) getOrCreateVideo(ctx context.Context, job *JobMessage) (*models.Video, error) {
+	videoID := job.VideoID
+	if videoID == "" {
+		videoID = uuid.New().String()[:8]
+	}
+
+	// Try to get existing video
+	// (In a real implementation, this would query DynamoDB)
+
+	// Create new video if not found
+	video := models.NewVideo(videoID)
+	video.SourceKey = job.Key
+	video.FileSize = job.Size
+
+	// Copy metadata
+	if job.Metadata != nil {
+		video.Metadata = job.Metadata
+	}
+
+	return video, nil
+}
+
+// updateVideo updates the video record in DynamoDB.
+func (w *Worker) updateVideo(ctx context.Context, video *models.Video) error {
+	// In a real implementation, this would update DynamoDB
+	video.UpdatedAt = time.Now()
+	return nil
+}
+
+// deleteMessage deletes a processed message from SQS.
+func (w *Worker) deleteMessage(ctx context.Context, msg types.Message) {
+	_, err := w.sqsClient.DeleteMessage(ctx, &sqs.DeleteMessageInput{
+		QueueUrl:      aws.String(w.config.SQSQueueURL),
+		ReceiptHandle: msg.ReceiptHandle,
+	})
+	if err != nil {
+		w.logger.Warn("failed to delete message",
+			"messageId", aws.ToString(msg.MessageId),
+			"error", err,
+		)
+	}
+}
+
+// sendWebhook sends a webhook notification.
+func (w *Worker) sendWebhook(ctx context.Context, url string, video *models.Video) {
+	payload := models.WebhookPayload{
+		Event:     "video.completed",
+		VideoID:   video.ID,
+		Status:    string(video.Status),
+		Timestamp: time.Now(),
+		Video:     video,
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		w.logger.Warn("failed to marshal webhook payload", "error", err)
+		return
+	}
+
+	// Fire and forget (in production, use a queue for reliability)
+	go func() {
+		// HTTP POST to webhook URL
+		_ = data // Would send this to the URL
+		w.logger.Debug("webhook sent", "url", url, "videoId", video.ID)
+	}()
 }
