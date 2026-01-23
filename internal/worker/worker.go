@@ -43,16 +43,6 @@ type Worker struct {
 	mu       sync.Mutex
 }
 
-// WorkerConfig contains worker configuration.
-type WorkerConfig struct {
-	QueueURL          string
-	MaxConcurrentJobs int
-	VisibilityTimeout int32
-	WaitTimeSeconds   int32
-	ProcessedBucket   string
-	TableName         string
-}
-
 // NewWorker creates a new worker instance.
 func NewWorker(
 	cfg *config.Config,
@@ -61,11 +51,13 @@ func NewWorker(
 	dynamoDBClient *dynamodb.Client,
 	logger *slog.Logger,
 ) (*Worker, error) {
-	// Create transcoder
+	// Create transcoder with properly nested config fields
 	tc, err := transcoder.NewLLHLSTranscoder(&transcoder.LLHLSConfig{
-		SegmentDuration: cfg.SegmentDuration,
-		PartDuration:    cfg.PartDuration,
-		EnableCMAF:      cfg.EnableCMAF,
+		SegmentDuration: cfg.Transcoding.SegmentDuration,
+		PartDuration:    cfg.Transcoding.PartDuration,
+		EnableCMAF:      cfg.Transcoding.EnableCMAF,
+		EnableLLHLS:     cfg.Transcoding.EnableLLHLS,
+		UseShaka:        cfg.Transcoding.UseShaka,
 	}, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create transcoder: %w", err)
@@ -74,7 +66,7 @@ func NewWorker(
 	// Create S3 event processor with default filter
 	s3EventProcessor := NewS3EventProcessor(DefaultS3EventFilter(), logger)
 
-	maxJobs := cfg.MaxConcurrentJobs
+	maxJobs := cfg.Worker.MaxConcurrentJobs
 	if maxJobs <= 0 {
 		maxJobs = 2
 	}
@@ -103,7 +95,7 @@ func (w *Worker) Start(ctx context.Context) error {
 	w.mu.Unlock()
 
 	w.logger.Info("worker starting",
-		"queueUrl", w.config.SQSQueueURL,
+		"queueUrl", w.config.AWS.SQSQueueURL,
 		"maxConcurrentJobs", cap(w.semaphore),
 	)
 
@@ -128,53 +120,43 @@ func (w *Worker) Stop() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if w.running {
-		close(w.shutdown)
-		w.running = false
+	if !w.running {
+		return
 	}
+
+	close(w.shutdown)
 }
 
-// gracefulShutdown waits for in-flight jobs to complete.
+// gracefulShutdown performs graceful shutdown.
 func (w *Worker) gracefulShutdown() error {
-	w.logger.Info("worker shutting down, waiting for in-flight jobs...")
-
-	done := make(chan struct{})
-	go func() {
-		w.wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		w.logger.Info("worker shutdown complete")
-	case <-time.After(5 * time.Minute):
-		w.logger.Warn("worker shutdown timeout, some jobs may not have completed")
-	}
-
+	w.logger.Info("shutting down worker, waiting for jobs to complete")
+	w.wg.Wait()
+	w.logger.Info("worker shutdown complete")
 	return nil
 }
 
-// pollMessages polls SQS for messages.
+// pollMessages polls for new messages from SQS.
 func (w *Worker) pollMessages(ctx context.Context) error {
-	result, err := w.sqsClient.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
-		QueueUrl:              aws.String(w.config.SQSQueueURL),
-		MaxNumberOfMessages:   10,
-		WaitTimeSeconds:       20,
-		VisibilityTimeout:     3600, // 1 hour
-		MessageAttributeNames: []string{"All"},
+	output, err := w.sqsClient.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
+		QueueUrl:            aws.String(w.config.AWS.SQSQueueURL),
+		MaxNumberOfMessages: 10,
+		WaitTimeSeconds:     20, // Long polling
+		VisibilityTimeout:   900, // 15 minutes
+		AttributeNames:      []types.QueueAttributeName{types.QueueAttributeNameAll},
 	})
 	if err != nil {
 		return fmt.Errorf("failed to receive messages: %w", err)
 	}
 
-	for _, msg := range result.Messages {
-		// Acquire semaphore slot
+	for _, msg := range output.Messages {
+		// Try to acquire semaphore
 		select {
 		case w.semaphore <- struct{}{}:
 			w.wg.Add(1)
 			go w.processMessage(ctx, msg)
-		case <-ctx.Done():
-			return ctx.Err()
+		default:
+			// All workers busy, put message back
+			w.logger.Debug("all workers busy, message will be retried")
 		}
 	}
 
@@ -278,7 +260,7 @@ func (w *Worker) processJob(ctx context.Context, job *JobMessage, video *models.
 		VideoID:      job.VideoID,
 		SourceBucket: job.Bucket,
 		SourceKey:    job.Key,
-		OutputBucket: w.config.ProcessedBucket,
+		OutputBucket: w.config.AWS.ProcessedBucket,
 		OutputPrefix: fmt.Sprintf("processed/%s", job.VideoID),
 	}
 
@@ -301,7 +283,7 @@ func (w *Worker) processJob(ctx context.Context, job *JobMessage, video *models.
 	// Update video with results
 	video.SetStatus(models.StatusCompleted)
 	video.HLSManifestURL = fmt.Sprintf("https://%s/%s/master.m3u8",
-		w.config.CDNDomain,
+		w.config.AWS.CDNDomain,
 		input.OutputPrefix,
 	)
 	video.Duration = output.Duration
@@ -341,8 +323,8 @@ func (w *Worker) getOrCreateVideo(ctx context.Context, job *JobMessage) (*models
 		videoID = uuid.New().String()[:8]
 	}
 
-	// Try to get existing video
-	// (In a real implementation, this would query DynamoDB)
+	// Try to get existing video from DynamoDB
+	// (Implementation would query DynamoDB here)
 
 	// Create new video if not found
 	video := models.NewVideo(videoID)
@@ -359,15 +341,18 @@ func (w *Worker) getOrCreateVideo(ctx context.Context, job *JobMessage) (*models
 
 // updateVideo updates the video record in DynamoDB.
 func (w *Worker) updateVideo(ctx context.Context, video *models.Video) error {
-	// In a real implementation, this would update DynamoDB
 	video.UpdatedAt = time.Now()
+
+	// Marshal video to DynamoDB attribute values
+	// (Implementation would update DynamoDB here)
+
 	return nil
 }
 
 // deleteMessage deletes a processed message from SQS.
 func (w *Worker) deleteMessage(ctx context.Context, msg types.Message) {
 	_, err := w.sqsClient.DeleteMessage(ctx, &sqs.DeleteMessageInput{
-		QueueUrl:      aws.String(w.config.SQSQueueURL),
+		QueueUrl:      aws.String(w.config.AWS.SQSQueueURL),
 		ReceiptHandle: msg.ReceiptHandle,
 	})
 	if err != nil {
@@ -379,13 +364,13 @@ func (w *Worker) deleteMessage(ctx context.Context, msg types.Message) {
 }
 
 // sendWebhook sends a webhook notification.
-func (w *Worker) sendWebhook(ctx context.Context, url string, video *models.Video) {
+func (w *Worker) sendWebhook(ctx context.Context, callbackURL string, video *models.Video) {
 	payload := models.WebhookPayload{
 		Event:     "video.completed",
 		VideoID:   video.ID,
 		Status:    string(video.Status),
 		Timestamp: time.Now(),
-		Video:     video,
+		Video:     video.ToPublic(),
 	}
 
 	data, err := json.Marshal(payload)
@@ -394,10 +379,32 @@ func (w *Worker) sendWebhook(ctx context.Context, url string, video *models.Vide
 		return
 	}
 
-	// Fire and forget (in production, use a queue for reliability)
-	go func() {
-		// HTTP POST to webhook URL
-		_ = data // Would send this to the URL
-		w.logger.Debug("webhook sent", "url", url, "videoId", video.ID)
-	}()
+	// Send webhook (implementation would make HTTP request)
+	_ = data
+}
+
+// IsTestEvent checks if the message is an S3 test event.
+func IsTestEvent(body string) bool {
+	return body == "s3:TestEvent" ||
+		(len(body) > 0 && body[0] == '{' && 
+			(contains(body, `"Event":"s3:TestEvent"`) || 
+			 contains(body, `"event":"s3:TestEvent"`)))
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && 
+		(s == substr || 
+		 len(s) > len(substr) && 
+		 (s[:len(substr)] == substr || 
+		  s[len(s)-len(substr):] == substr ||
+		  containsInner(s, substr)))
+}
+
+func containsInner(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }

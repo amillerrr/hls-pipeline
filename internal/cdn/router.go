@@ -2,14 +2,17 @@ package cdn
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand"
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -17,7 +20,25 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-var tracer = otel.Tracer("cdn-router")
+var tracer = otel.Tracer("hls-pipeline/cdn")
+
+// Common errors
+var (
+	ErrNoCDNAvailable    = errors.New("no CDN available")
+	ErrInvalidConfig     = errors.New("invalid CDN configuration")
+	ErrHealthCheckFailed = errors.New("health check failed")
+)
+
+// SelectionStrategy defines how CDN selection is performed.
+type SelectionStrategy int
+
+const (
+	StrategyWeightedRoundRobin SelectionStrategy = iota
+	StrategyLowestLatency
+	StrategyGeoBased
+	StrategyFailoverOnly
+	StrategyRandom
+)
 
 // Provider represents a CDN provider.
 type Provider struct {
@@ -36,6 +57,9 @@ type Provider struct {
 	// HealthURL is the URL used for health checks.
 	HealthURL string `json:"healthUrl"`
 
+	// SigningKey for URL signing (if required).
+	SigningKey string `json:"-"`
+
 	// Healthy indicates if this provider is currently healthy.
 	Healthy bool `json:"healthy"`
 
@@ -45,7 +69,7 @@ type Provider struct {
 	// ErrorRate is the current error rate (0.0-1.0).
 	ErrorRate float64 `json:"errorRate"`
 
-	// Region specifies which regions this CDN serves best.
+	// Regions specifies which regions this CDN serves best.
 	Regions []string `json:"regions,omitempty"`
 
 	// Features lists supported features (e.g., "ll-hls", "drm", "ssai").
@@ -54,12 +78,20 @@ type Provider struct {
 	// Headers contains custom headers to add for this CDN.
 	Headers map[string]string `json:"headers,omitempty"`
 
+	// LastCheck is when the last health check was performed.
+	LastCheck time.Time `json:"lastCheck"`
+
+	// RequestCount tracks total requests to this provider.
+	RequestCount int64 `json:"requestCount"`
+
+	// FailureCount tracks consecutive failures.
+	FailureCount int32 `json:"failureCount"`
+
 	// mu protects mutable fields.
 	mu sync.RWMutex
 
 	// Internal tracking
 	consecutiveFailures int
-	lastCheck           time.Time
 	successCount        int64
 	errorCount          int64
 }
@@ -69,6 +101,9 @@ type RouterConfig struct {
 	// Providers is the list of CDN providers.
 	Providers []*Provider `json:"providers"`
 
+	// Strategy is the selection strategy.
+	Strategy SelectionStrategy `json:"strategy"`
+
 	// HealthCheckInterval is how often to check CDN health.
 	HealthCheckInterval time.Duration `json:"healthCheckInterval"`
 
@@ -77,6 +112,9 @@ type RouterConfig struct {
 
 	// FailoverThreshold is the number of consecutive failures before failover.
 	FailoverThreshold int `json:"failoverThreshold"`
+
+	// MaxFailures is an alias for FailoverThreshold (backwards compatibility).
+	MaxFailures int32 `json:"maxFailures"`
 
 	// ErrorRateThreshold is the error rate above which a CDN is marked unhealthy.
 	ErrorRateThreshold float64 `json:"errorRateThreshold"`
@@ -92,47 +130,89 @@ type RouterConfig struct {
 
 	// DefaultRegion is the default region when client region is unknown.
 	DefaultRegion string `json:"defaultRegion"`
+
+	// RecoveryPeriod is how long to wait before trying an unhealthy provider again.
+	RecoveryPeriod time.Duration `json:"recoveryPeriod"`
 }
 
 // DefaultRouterConfig returns the default router configuration.
 func DefaultRouterConfig() *RouterConfig {
 	return &RouterConfig{
 		Providers:             []*Provider{},
+		Strategy:              StrategyWeightedRoundRobin,
 		HealthCheckInterval:   30 * time.Second,
 		HealthCheckTimeout:    5 * time.Second,
 		FailoverThreshold:     3,
+		MaxFailures:           3,
 		ErrorRateThreshold:    0.1, // 10% error rate
 		EnableWeightedRouting: true,
 		EnableLatencyRouting:  false,
 		EnableRegionRouting:   false,
 		DefaultRegion:         "us-east-1",
+		RecoveryPeriod:        60 * time.Second,
 	}
 }
 
 // Router handles multi-CDN routing.
 type Router struct {
-	config     *RouterConfig
-	httpClient *http.Client
-	logger     *slog.Logger
-	mu         sync.RWMutex
-	stopCh     chan struct{}
-	wg         sync.WaitGroup
+	config      *RouterConfig
+	httpClient  *http.Client
+	logger      *slog.Logger
+	mu          sync.RWMutex
+	totalWeight int
+	stopCh      chan struct{}
+	wg          sync.WaitGroup
 }
 
 // NewRouter creates a new CDN router.
-func NewRouter(config *RouterConfig, logger *slog.Logger) *Router {
+func NewRouter(config *RouterConfig, logger *slog.Logger) (*Router, error) {
 	if config == nil {
 		config = DefaultRouterConfig()
 	}
 
+	if len(config.Providers) == 0 {
+		// Return router without providers (can be added later)
+		return &Router{
+			config: config,
+			httpClient: &http.Client{
+				Timeout: config.HealthCheckTimeout,
+			},
+			logger: logger,
+			stopCh: make(chan struct{}),
+		}, nil
+	}
+
+	totalWeight := 0
+	for _, p := range config.Providers {
+		if p.Name == "" || p.BaseURL == "" {
+			return nil, fmt.Errorf("%w: provider missing name or base URL", ErrInvalidConfig)
+		}
+		if p.Weight <= 0 {
+			p.Weight = 1
+		}
+		totalWeight += p.Weight
+		p.Healthy = true
+	}
+
+	// Sort by priority
+	sort.Slice(config.Providers, func(i, j int) bool {
+		return config.Providers[i].Priority < config.Providers[j].Priority
+	})
+
 	return &Router{
-		config: config,
+		config:      config,
+		totalWeight: totalWeight,
+		logger:      logger,
 		httpClient: &http.Client{
 			Timeout: config.HealthCheckTimeout,
+			Transport: &http.Transport{
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 10,
+				IdleConnTimeout:     90 * time.Second,
+			},
 		},
-		logger: logger,
 		stopCh: make(chan struct{}),
-	}
+	}, nil
 }
 
 // Start starts the health check goroutine.
@@ -151,11 +231,11 @@ func (r *Router) Stop() {
 func (r *Router) healthCheckLoop(ctx context.Context) {
 	defer r.wg.Done()
 
-	ticker := time.NewTicker(r.config.HealthCheckInterval)
-	defer ticker.Stop()
-
 	// Initial health check
 	r.checkAllProviders(ctx)
+
+	ticker := time.NewTicker(r.config.HealthCheckInterval)
+	defer ticker.Stop()
 
 	for {
 		select {
@@ -224,10 +304,11 @@ func (r *Router) checkProvider(ctx context.Context, provider *Provider) {
 
 	provider.mu.Lock()
 	provider.Latency = latency
-	provider.lastCheck = time.Now()
+	provider.LastCheck = time.Now()
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
 		provider.consecutiveFailures = 0
+		atomic.StoreInt32(&provider.FailureCount, 0)
 		provider.Healthy = true
 		r.logger.DebugContext(ctx, "CDN health check passed",
 			"cdn", provider.Name,
@@ -235,6 +316,7 @@ func (r *Router) checkProvider(ctx context.Context, provider *Provider) {
 		)
 	} else {
 		provider.consecutiveFailures++
+		atomic.AddInt32(&provider.FailureCount, 1)
 		if provider.consecutiveFailures >= r.config.FailoverThreshold {
 			provider.Healthy = false
 			r.logger.WarnContext(ctx, "CDN marked unhealthy",
@@ -257,7 +339,8 @@ func (r *Router) markProviderUnhealthy(provider *Provider, err error) {
 	defer provider.mu.Unlock()
 
 	provider.consecutiveFailures++
-	provider.lastCheck = time.Now()
+	provider.LastCheck = time.Now()
+	atomic.AddInt32(&provider.FailureCount, 1)
 
 	if provider.consecutiveFailures >= r.config.FailoverThreshold {
 		provider.Healthy = false
@@ -285,32 +368,45 @@ func (r *Router) SelectCDN(ctx context.Context, clientRegion string) (*Provider,
 	// Filter healthy providers
 	healthy := r.filterHealthy(providers)
 	if len(healthy) == 0 {
-		return nil, fmt.Errorf("no healthy CDN providers available")
+		return nil, ErrNoCDNAvailable
 	}
 
 	var selected *Provider
 
-	// Apply routing strategy
-	if r.config.EnableRegionRouting && clientRegion != "" {
-		selected = r.selectByRegion(healthy, clientRegion)
-	}
-
-	if selected == nil && r.config.EnableLatencyRouting {
-		selected = r.selectByLatency(healthy)
-	}
-
-	if selected == nil && r.config.EnableWeightedRouting {
-		selected = r.selectByWeight(healthy)
-	}
-
-	if selected == nil {
-		// Fallback to first healthy provider by priority
-		selected = healthy[0]
-		for _, p := range healthy {
-			if p.Priority < selected.Priority {
-				selected = p
-			}
+	// Apply routing strategy based on config
+	switch r.config.Strategy {
+	case StrategyGeoBased:
+		if clientRegion != "" {
+			selected = r.selectByRegion(healthy, clientRegion)
 		}
+	case StrategyLowestLatency:
+		selected = r.selectByLatency(healthy)
+	case StrategyWeightedRoundRobin:
+		selected = r.selectByWeight(healthy)
+	case StrategyFailoverOnly:
+		selected = r.selectByPriority(healthy)
+	case StrategyRandom:
+		selected = r.selectRandom(healthy)
+	}
+
+	// Fallback selection if strategy didn't select
+	if selected == nil {
+		if r.config.EnableRegionRouting && clientRegion != "" {
+			selected = r.selectByRegion(healthy, clientRegion)
+		}
+		if selected == nil && r.config.EnableLatencyRouting {
+			selected = r.selectByLatency(healthy)
+		}
+		if selected == nil && r.config.EnableWeightedRouting {
+			selected = r.selectByWeight(healthy)
+		}
+		if selected == nil {
+			selected = r.selectByPriority(healthy)
+		}
+	}
+
+	if selected != nil {
+		atomic.AddInt64(&selected.RequestCount, 1)
 	}
 
 	span.SetAttributes(
@@ -369,7 +465,7 @@ func (r *Router) selectByLatency(providers []*Provider) *Provider {
 		bestLatency := best.Latency
 		best.mu.RUnlock()
 
-		if pLatency > 0 && pLatency < bestLatency {
+		if pLatency > 0 && (bestLatency == 0 || pLatency < bestLatency) {
 			best = p
 		}
 	}
@@ -378,6 +474,13 @@ func (r *Router) selectByLatency(providers []*Provider) *Provider {
 
 // selectByWeight selects a CDN using weighted random selection.
 func (r *Router) selectByWeight(providers []*Provider) *Provider {
+	if len(providers) == 0 {
+		return nil
+	}
+	if len(providers) == 1 {
+		return providers[0]
+	}
+
 	totalWeight := 0
 	for _, p := range providers {
 		totalWeight += p.Weight
@@ -400,13 +503,50 @@ func (r *Router) selectByWeight(providers []*Provider) *Provider {
 	return providers[len(providers)-1]
 }
 
+// selectByPriority selects the highest priority (lowest number) healthy provider.
+func (r *Router) selectByPriority(providers []*Provider) *Provider {
+	if len(providers) == 0 {
+		return nil
+	}
+
+	best := providers[0]
+	for _, p := range providers[1:] {
+		if p.Priority < best.Priority {
+			best = p
+		}
+	}
+	return best
+}
+
+// selectRandom selects a random provider.
+func (r *Router) selectRandom(providers []*Provider) *Provider {
+	if len(providers) == 0 {
+		return nil
+	}
+	if len(providers) == 1 {
+		return providers[0]
+	}
+	return providers[rand.Intn(len(providers))]
+}
+
 // RecordSuccess records a successful request to a CDN.
-func (r *Router) RecordSuccess(provider *Provider) {
+func (r *Router) RecordSuccess(provider *Provider, latency ...time.Duration) {
 	provider.mu.Lock()
 	defer provider.mu.Unlock()
 
 	provider.successCount++
 	provider.consecutiveFailures = 0
+	atomic.StoreInt32(&provider.FailureCount, 0)
+
+	// Update latency if provided
+	if len(latency) > 0 && latency[0] > 0 {
+		if provider.Latency == 0 {
+			provider.Latency = latency[0]
+		} else {
+			// Exponential moving average
+			provider.Latency = (provider.Latency*7 + latency[0]*3) / 10
+		}
+	}
 
 	// Update error rate with exponential decay
 	total := float64(provider.successCount + provider.errorCount)
@@ -422,11 +562,17 @@ func (r *Router) RecordSuccess(provider *Provider) {
 
 // RecordError records a failed request to a CDN.
 func (r *Router) RecordError(provider *Provider, err error) {
+	r.RecordFailure(provider, err)
+}
+
+// RecordFailure records a failed request to a CDN.
+func (r *Router) RecordFailure(provider *Provider, err error) {
 	provider.mu.Lock()
 	defer provider.mu.Unlock()
 
 	provider.errorCount++
 	provider.consecutiveFailures++
+	atomic.AddInt32(&provider.FailureCount, 1)
 
 	// Update error rate
 	total := float64(provider.successCount + provider.errorCount)
@@ -439,6 +585,61 @@ func (r *Router) RecordError(provider *Provider, err error) {
 		provider.consecutiveFailures >= r.config.FailoverThreshold {
 		provider.Healthy = false
 	}
+}
+
+// GetProviders returns all configured providers.
+func (r *Router) GetProviders() []*Provider {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	providers := make([]*Provider, len(r.config.Providers))
+	copy(providers, r.config.Providers)
+	return providers
+}
+
+// GetHealthyCount returns the number of healthy providers.
+func (r *Router) GetHealthyCount() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	count := 0
+	for _, p := range r.config.Providers {
+		if p.Healthy {
+			count++
+		}
+	}
+	return count
+}
+
+// ProviderStats contains statistics for a single provider.
+type ProviderStats struct {
+	Healthy      bool          `json:"healthy"`
+	Latency      time.Duration `json:"latency"`
+	RequestCount int64         `json:"requestCount"`
+	FailureCount int32         `json:"failureCount"`
+	ErrorRate    float64       `json:"errorRate"`
+	LastCheck    time.Time     `json:"lastCheck"`
+}
+
+// GetStats returns statistics for all providers.
+func (r *Router) GetStats() map[string]ProviderStats {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	stats := make(map[string]ProviderStats)
+	for _, p := range r.config.Providers {
+		p.mu.RLock()
+		stats[p.Name] = ProviderStats{
+			Healthy:      p.Healthy,
+			Latency:      p.Latency,
+			RequestCount: atomic.LoadInt64(&p.RequestCount),
+			FailureCount: atomic.LoadInt32(&p.FailureCount),
+			ErrorRate:    p.ErrorRate,
+			LastCheck:    p.LastCheck,
+		}
+		p.mu.RUnlock()
+	}
+	return stats
 }
 
 // RewriteManifest rewrites URLs in an HLS manifest to use the selected CDN.
@@ -459,124 +660,36 @@ func (r *Router) RewriteManifest(ctx context.Context, manifest string, provider 
 	}
 
 	// Pattern to match segment URLs in HLS
-	urlPattern := regexp.MustCompile(`(?m)^([^#\s].+\.(m3u8|m4s|ts|mp4|key))$`)
+	urlPattern := regexp.MustCompile(`(?m)^([^#\s].+\.(m3u8|ts|m4s|mp4|aac))`)
 
 	rewritten := urlPattern.ReplaceAllStringFunc(manifest, func(match string) string {
-		// If already absolute URL, replace host
+		// Skip absolute URLs
 		if strings.HasPrefix(match, "http://") || strings.HasPrefix(match, "https://") {
-			parsed, err := url.Parse(match)
-			if err != nil {
-				return match
-			}
-			parsed.Scheme = baseURL.Scheme
-			parsed.Host = baseURL.Host
-			return parsed.String()
+			return match
 		}
 
-		// Relative URL - prepend CDN base
-		return baseURL.String() + "/" + strings.TrimPrefix(match, "/")
+		// Construct new URL
+		newURL := baseURL.JoinPath(match)
+		return newURL.String()
 	})
-
-	// Add CDN-specific headers if configured
-	if len(provider.Headers) > 0 {
-		var headerLines []string
-		for k, v := range provider.Headers {
-			headerLines = append(headerLines, fmt.Sprintf("#EXT-X-CDN-HEADER:%s=%s", k, v))
-		}
-		rewritten = strings.Join(headerLines, "\n") + "\n" + rewritten
-	}
 
 	return rewritten, nil
 }
 
-// GetProviderByName returns a provider by name.
-func (r *Router) GetProviderByName(name string) *Provider {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	for _, p := range r.config.Providers {
-		if p.Name == name {
-			return p
-		}
+// ParseStrategy parses a strategy string into a SelectionStrategy.
+func ParseStrategy(s string) SelectionStrategy {
+	switch strings.ToLower(s) {
+	case "weighted", "weighted_round_robin":
+		return StrategyWeightedRoundRobin
+	case "latency", "lowest_latency":
+		return StrategyLowestLatency
+	case "geo", "geo_based":
+		return StrategyGeoBased
+	case "failover", "failover_only":
+		return StrategyFailoverOnly
+	case "random":
+		return StrategyRandom
+	default:
+		return StrategyWeightedRoundRobin
 	}
-	return nil
-}
-
-// GetAllProviders returns all providers.
-func (r *Router) GetAllProviders() []*Provider {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	providers := make([]*Provider, len(r.config.Providers))
-	copy(providers, r.config.Providers)
-	return providers
-}
-
-// AddProvider adds a new CDN provider.
-func (r *Router) AddProvider(provider *Provider) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	provider.Healthy = true
-	r.config.Providers = append(r.config.Providers, provider)
-}
-
-// RemoveProvider removes a CDN provider by name.
-func (r *Router) RemoveProvider(name string) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	for i, p := range r.config.Providers {
-		if p.Name == name {
-			r.config.Providers = append(r.config.Providers[:i], r.config.Providers[i+1:]...)
-			return true
-		}
-	}
-	return false
-}
-
-// UpdateWeight updates the weight for a provider.
-func (r *Router) UpdateWeight(name string, weight int) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	for _, p := range r.config.Providers {
-		if p.Name == name {
-			p.Weight = weight
-			return true
-		}
-	}
-	return false
-}
-
-// GetStats returns current CDN statistics.
-func (r *Router) GetStats() map[string]interface{} {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	stats := make(map[string]interface{})
-	providerStats := make([]map[string]interface{}, 0)
-
-	for _, p := range r.config.Providers {
-		p.mu.RLock()
-		pStats := map[string]interface{}{
-			"name":          p.Name,
-			"healthy":       p.Healthy,
-			"weight":        p.Weight,
-			"priority":      p.Priority,
-			"latency_ms":    p.Latency.Milliseconds(),
-			"error_rate":    p.ErrorRate,
-			"success_count": p.successCount,
-			"error_count":   p.errorCount,
-			"last_check":    p.lastCheck,
-		}
-		p.mu.RUnlock()
-		providerStats = append(providerStats, pStats)
-	}
-
-	stats["providers"] = providerStats
-	stats["total_providers"] = len(r.config.Providers)
-	stats["healthy_providers"] = len(r.filterHealthy(r.config.Providers))
-
-	return stats
 }

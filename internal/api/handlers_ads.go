@@ -4,40 +4,40 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"time"
 
-	"github.com/gorilla/mux"
+	"github.com/go-chi/chi/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
 
-	"hls-pipeline/internal/ssai"
+	"github.com/amillerrr/hls-pipeline/internal/ssai"
 )
 
-var adsTracer = otel.Tracer("api-ads")
+var adsTracer = otel.Tracer("hls-pipeline/api-ads")
 
 // AdsHandler handles SSAI-related endpoints.
 type AdsHandler struct {
-	mediaTailor *ssai.Client
+	mediaTailor *ssai.MediaTailorClient
 	logger      *slog.Logger
 }
 
 // NewAdsHandler creates a new ads handler.
-func NewAdsHandler(mediaTailor *ssai.Client, logger *slog.Logger) *AdsHandler {
+func NewAdsHandler(mediaTailor *ssai.MediaTailorClient, logger *slog.Logger) *AdsHandler {
 	return &AdsHandler{
 		mediaTailor: mediaTailor,
 		logger:      logger,
 	}
 }
 
-// RegisterRoutes registers the ads routes with the router.
-func (h *AdsHandler) RegisterRoutes(r *mux.Router) {
-	r.HandleFunc("/ssai/session", h.CreateSession).Methods(http.MethodPost)
-	r.HandleFunc("/ssai/session/{sessionId}", h.GetSession).Methods(http.MethodGet)
-	r.HandleFunc("/ssai/session/{sessionId}/track", h.TrackAdEvent).Methods(http.MethodPost)
-	r.HandleFunc("/ssai/playback/{videoId}", h.GetPlaybackURL).Methods(http.MethodGet)
-	r.HandleFunc("/ssai/avails/{videoId}", h.GetAvailableSlots).Methods(http.MethodGet)
+// RegisterRoutes registers the ads routes with the chi router.
+func (h *AdsHandler) RegisterRoutes(r chi.Router) {
+	r.Route("/ssai", func(r chi.Router) {
+		r.Post("/session", h.CreateSession)
+		r.Get("/session/{sessionId}", h.GetSession)
+		r.Post("/session/{sessionId}/track", h.TrackAdEvent)
+		r.Get("/playback/{videoId}", h.GetPlaybackURL)
+		r.Get("/avails/{videoId}", h.GetAvailableSlots)
+	})
 }
 
 // CreateSessionRequest is the request body for session creation.
@@ -87,14 +87,16 @@ func (h *AdsHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 		attribute.String("content.path", contentPath),
 	)
 
-	params := ssai.SessionParams{
-		PlayerParams: req.PlayerParams,
-		AdParams:     req.AdParams,
-		ViewerID:     req.ViewerID,
-		DeviceType:   req.DeviceType,
+	// Build session request
+	sessionReq := &ssai.SessionRequest{
+		ContentID:  req.VideoID,
+		ViewerID:   req.ViewerID,
+		DeviceType: req.DeviceType,
+		AdParams:   req.AdParams,
+		SourceURL:  contentPath,
 	}
 
-	session, err := h.mediaTailor.CreateSession(ctx, contentPath, params)
+	session, err := h.mediaTailor.CreateSession(ctx, sessionReq)
 	if err != nil {
 		h.logger.ErrorContext(ctx, "Failed to create session", "error", err)
 		span.RecordError(err)
@@ -104,11 +106,9 @@ func (h *AdsHandler) CreateSession(w http.ResponseWriter, r *http.Request) {
 
 	response := CreateSessionResponse{
 		SessionID:        session.SessionID,
-		HLSManifestURL:   h.mediaTailor.GetPlaybackURL(session),
-		DASHManifestURL:  h.mediaTailor.GetDASHPlaybackURL(session),
-		TrackingEndpoint: session.TrackingEndpoint,
+		HLSManifestURL:   session.ManifestURL,
+		TrackingEndpoint: session.TrackingURL,
 		ExpiresAt:        session.ExpiresAt,
-		PlayerParams:     session.PlayerParams,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -120,8 +120,7 @@ func (h *AdsHandler) GetSession(w http.ResponseWriter, r *http.Request) {
 	ctx, span := adsTracer.Start(r.Context(), "get-ssai-session")
 	defer span.End()
 
-	vars := mux.Vars(r)
-	sessionID := vars["sessionId"]
+	sessionID := chi.URLParam(r, "sessionId")
 
 	if sessionID == "" {
 		http.Error(w, "sessionId required", http.StatusBadRequest)
@@ -131,7 +130,6 @@ func (h *AdsHandler) GetSession(w http.ResponseWriter, r *http.Request) {
 	span.SetAttributes(attribute.String("session.id", sessionID))
 
 	// In a real implementation, you'd retrieve the session from a store
-	// For now, return a minimal response
 	response := map[string]interface{}{
 		"sessionId": sessionID,
 		"status":    "active",
@@ -154,8 +152,7 @@ func (h *AdsHandler) TrackAdEvent(w http.ResponseWriter, r *http.Request) {
 	ctx, span := adsTracer.Start(r.Context(), "track-ad-event")
 	defer span.End()
 
-	vars := mux.Vars(r)
-	sessionID := vars["sessionId"]
+	sessionID := chi.URLParam(r, "sessionId")
 
 	var req TrackAdEventRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -174,12 +171,9 @@ func (h *AdsHandler) TrackAdEvent(w http.ResponseWriter, r *http.Request) {
 		attribute.String("ad.id", req.AdID),
 	)
 
-	// Create a minimal session object for tracking
-	session := &ssai.Session{
-		SessionID: sessionID,
-	}
-
-	if err := h.mediaTailor.ReportAdTracking(ctx, session, req.EventType, req.AdID); err != nil {
+	// Build tracking URL and report
+	trackingURL := h.buildTrackingURL(sessionID, req.EventType, req.AdID)
+	if err := h.mediaTailor.ReportAdEvent(ctx, trackingURL); err != nil {
 		h.logger.ErrorContext(ctx, "Failed to track ad event", "error", err)
 		span.RecordError(err)
 		http.Error(w, "Failed to track event", http.StatusInternalServerError)
@@ -201,8 +195,7 @@ func (h *AdsHandler) GetPlaybackURL(w http.ResponseWriter, r *http.Request) {
 	ctx, span := adsTracer.Start(r.Context(), "get-playback-url")
 	defer span.End()
 
-	vars := mux.Vars(r)
-	videoID := vars["videoId"]
+	videoID := chi.URLParam(r, "videoId")
 
 	if videoID == "" {
 		http.Error(w, "videoId required", http.StatusBadRequest)
@@ -219,12 +212,13 @@ func (h *AdsHandler) GetPlaybackURL(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	params := ssai.SessionParams{
-		AdParams: adParams,
+	sessionReq := &ssai.SessionRequest{
+		ContentID: videoID,
+		AdParams:  adParams,
+		SourceURL: videoID + "/master.m3u8",
 	}
 
-	contentPath := videoID + "/master.m3u8"
-	session, err := h.mediaTailor.CreateSession(ctx, contentPath, params)
+	session, err := h.mediaTailor.CreateSession(ctx, sessionReq)
 	if err != nil {
 		h.logger.ErrorContext(ctx, "Failed to create playback session", "error", err)
 		span.RecordError(err)
@@ -233,9 +227,8 @@ func (h *AdsHandler) GetPlaybackURL(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := GetPlaybackURLResponse{
-		HLSManifestURL:  h.mediaTailor.GetPlaybackURL(session),
-		DASHManifestURL: h.mediaTailor.GetDASHPlaybackURL(session),
-		SessionID:       session.SessionID,
+		HLSManifestURL: session.ManifestURL,
+		SessionID:      session.SessionID,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -244,17 +237,18 @@ func (h *AdsHandler) GetPlaybackURL(w http.ResponseWriter, r *http.Request) {
 
 // GetAvailableSlotsResponse is the response for available ad slots.
 type GetAvailableSlotsResponse struct {
-	VideoID  string           `json:"videoId"`
-	Duration float64          `json:"duration"`
-	Slots    []AdSlotResponse `json:"slots"`
+	VideoID   string    `json:"videoId"`
+	AdSlots   []AdSlot  `json:"adSlots"`
+	UpdatedAt time.Time `json:"updatedAt"`
 }
 
-// AdSlotResponse represents an ad slot in the response.
-type AdSlotResponse struct {
-	ID          string  `json:"id"`
-	Type        string  `json:"type"`
-	StartTime   float64 `json:"startTime"`
-	MaxDuration float64 `json:"maxDuration"`
+// AdSlot represents an available ad slot.
+type AdSlot struct {
+	ID           string  `json:"id"`
+	StartTime    float64 `json:"startTime"`
+	Duration     float64 `json:"duration"`
+	Type         string  `json:"type"` // "preroll", "midroll", "postroll"
+	SlotPosition int     `json:"slotPosition"`
 }
 
 // GetAvailableSlots returns available ad slots for a video.
@@ -262,54 +256,53 @@ func (h *AdsHandler) GetAvailableSlots(w http.ResponseWriter, r *http.Request) {
 	ctx, span := adsTracer.Start(r.Context(), "get-available-slots")
 	defer span.End()
 
-	vars := mux.Vars(r)
-	videoID := vars["videoId"]
+	videoID := chi.URLParam(r, "videoId")
 
 	if videoID == "" {
 		http.Error(w, "videoId required", http.StatusBadRequest)
 		return
 	}
 
-	// Get content duration from query (or would be looked up from metadata)
-	durationStr := r.URL.Query().Get("duration")
-	duration := 3600.0 // Default 1 hour
-	if durationStr != "" {
-		if d, err := strconv.ParseFloat(durationStr, 64); err == nil {
-			duration = d
+	span.SetAttributes(attribute.String("video.id", videoID))
+
+	// Get ad breaks from MediaTailor
+	adBreaks, err := h.mediaTailor.GetTrackingEvents(ctx, videoID)
+	if err != nil {
+		h.logger.ErrorContext(ctx, "Failed to get ad slots", "error", err)
+		span.RecordError(err)
+		http.Error(w, "Failed to get ad slots", http.StatusInternalServerError)
+		return
+	}
+
+	// Convert to ad slots
+	slots := make([]AdSlot, 0, len(adBreaks))
+	for i, ab := range adBreaks {
+		slotType := "midroll"
+		if ab.StartTime.Seconds() == 0 {
+			slotType = "preroll"
 		}
-	}
 
-	span.SetAttributes(
-		attribute.String("video.id", videoID),
-		attribute.Float64("duration", duration),
-	)
-
-	contentDuration := time.Duration(duration * float64(time.Second))
-
-	// Define midroll positions (every 10 minutes)
-	var midrollPositions []time.Duration
-	for t := 10 * time.Minute; t < contentDuration-time.Minute; t += 10 * time.Minute {
-		midrollPositions = append(midrollPositions, t)
-	}
-
-	markers := h.mediaTailor.GetAvailableSlots(ctx, contentDuration, midrollPositions)
-
-	slots := make([]AdSlotResponse, 0, len(markers))
-	for _, marker := range markers {
-		slots = append(slots, AdSlotResponse{
-			ID:          marker.ID,
-			Type:        string(marker.Type),
-			StartTime:   marker.Time.Seconds(),
-			MaxDuration: marker.Duration.Seconds(),
+		slots = append(slots, AdSlot{
+			ID:           ab.SpliceEventID.String(),
+			StartTime:    ab.StartTime.Seconds(),
+			Duration:     ab.Duration.Seconds(),
+			Type:         slotType,
+			SlotPosition: i + 1,
 		})
 	}
 
 	response := GetAvailableSlotsResponse{
-		VideoID:  videoID,
-		Duration: duration,
-		Slots:    slots,
+		VideoID:   videoID,
+		AdSlots:   slots,
+		UpdatedAt: time.Now(),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
+}
+
+// buildTrackingURL builds the tracking URL for an ad event.
+func (h *AdsHandler) buildTrackingURL(sessionID, eventType, adID string) string {
+	// This would typically be constructed based on MediaTailor configuration
+	return ""
 }
