@@ -1,0 +1,263 @@
+version: "1.0"
+
+collections:
+  # Default encoding ladder for VOD content
+  - name: default
+    description: "Standard encoding ladder for VOD content"
+    presets:
+      - name: "1080p"
+        width: 1920
+        height: 1080
+        videoBitrate: "5000k"
+        audioBitrate: "192k"
+        profile: "high"
+        level: "4.2"
+        maxRate: "5500k"
+        bufSize: "7500k"
+        frameRate: 30.0
+        gopSeconds: 2.0
+
+      - name: "720p"
+        width: 1280
+        height: 720
+        videoBitrate: "2800k"
+        audioBitrate: "128k"
+        profile: "high"
+        level: "4.1"
+        maxRate: "3080k"
+        bufSize: "5600k"
+        frameRate: 30.0
+        gopSeconds: 2.0
+
+      - name: "480p"
+        width: 854
+        height: 480
+        videoBitrate: "1400k"
+        audioBitrate: "128k"
+        profile: "main"
+        level: "3.1"
+        maxRate: "1540k"
+        bufSize: "2800k"
+        frameRate: 30.0
+        gopSeconds: 2.0
+
+      - name: "360p"
+        width: 640
+        height: 360
+        videoBitrate: "800k"
+        audioBitrate: "96k"
+        profile: "main"
+        level: "3.0"
+        maxRate: "880k"
+        bufSize: "1600k"
+        frameRate: 30.0
+        gopSeconds: 2.0
+
+      - name: "240p"
+        width: 426
+        height: 240
+        videoBitrate: "400k"
+        audioBitrate: "64k"
+        profile: "baseline"
+        level: "3.0"
+        maxRate: "440k"
+        bufSize: "800k"
+        frameRate: 30.0
+        gopSeconds: 2.0
+
+  # LL-HLS optimized ladder with shorter GOPs
+  - name: llhls
+    description: "Low-latency HLS optimized encoding ladder"
+    presets:
+      - name: "1080p"
+        width: 1920
+        height: 1080
+        videoBitrate: "5000k"
+        audioBitrate: "192k"
+        profile: "high"
+        level: "4.2"
+        maxRate: "5500k"
+        bufSize: "5000k"
+        frameRate: 30.0
+        gopSeconds: 1.0  # Shorter GOP for lower latency
+
+      - name: "720p"
+        width: 1280
+        height: 720
+        videoBitrate: "2800k"
+        audioBitrate: "128k"
+        profile: "high"
+        level: "4.1"
+        maxRate: "3080k"
+        bufSize: "2800k"
+        frameRate: 30.0
+        gopSeconds: 1.0
+
+      - name: "480p"
+        width: 854
+        height: 480
+        videoBitrate: "1400k"
+        audioBitrate: "128k"
+        profile: "main"
+        level: "3.1"
+        maxRate: "1540k"
+        bufSize: "1400k"
+        frameRate: 30.0
+        gopSeconds: 1.0
+
+      - name: "360p"
+        width: 640
+        height: 360
+        videoBitrate: "800k"
+        audioBitrate: "96k"
+        profile: "main"
+        level: "3.0"
+        maxRate: "880k"
+        bufSize: "800k"
+        frameRate: 30.0
+        gopSeconds: 1.0
+
+  # High-quality ladder for premium content
+  - name: premium
+    description: "High-quality encoding ladder for premium content"
+    presets:
+      - name: "4k"
+        width: 3840
+        height: 2160
+        videoBitrate: "15000k"
+        audioBitrate: "256k"
+        profile: "high"
+        level: "5.1"
+        maxRate: "18000k"
+        bufSize: "30000k"
+        frameRate: 30.0
+        gopSeconds: 2.0
+
+      - name: "1080p"
+        width: 1920
+        height: 1080
+        videoBitrate: "8000k"
+        audioBitrate: "192k"
+        profile: "high"
+        level: "4.2"
+        maxRate: "9000k"
+        bufSize: "12000k"
+        frameRate: 30.0
+        gopSeconds: 2.0
+
+      - name: "720p"
+        width: 1280
+        height: 720
+        videoBitrate: "5000k"
+        audioBitrate: "128k"
+        profile: "high"
+        level: "4.1"
+        maxRate: "5500k"
+        bufSize: "7500k"
+        frameRate: 30.0
+        gopSeconds: 2.0
+
+      - name: "480p"
+        width: 854
+        height: 480
+        videoBitrate: "2500k"
+        audioBitrate: "128k"
+        profile: "main"
+        level: "3.1"
+        maxRate: "2750k"
+        bufSize: "3750k"
+        frameRate: 30.0
+        gopSeconds: 2.0
+
+  # Mobile-optimized ladder
+  - name: mobile
+    description: "Mobile-optimized encoding ladder"
+    presets:
+      - name: "720p"
+        width: 1280
+        height: 720
+        videoBitrate: "2000k"
+        audioBitrate: "128k"
+        profile: "main"
+        level: "4.0"
+        maxRate: "2200k"
+        bufSize: "4000k"
+        frameRate: 30.0
+        gopSeconds: 2.0
+
+      - name: "480p"
+        width: 854
+        height: 480
+        videoBitrate: "1000k"
+        audioBitrate: "96k"
+        profile: "main"
+        level: "3.1"
+        maxRate: "1100k"
+        bufSize: "2000k"
+        frameRate: 30.0
+        gopSeconds: 2.0
+
+      - name: "360p"
+        width: 640
+        height: 360
+        videoBitrate: "600k"
+        audioBitrate: "64k"
+        profile: "baseline"
+        level: "3.0"
+        maxRate: "660k"
+        bufSize: "1200k"
+        frameRate: 30.0
+        gopSeconds: 2.0
+
+      - name: "240p"
+        width: 426
+        height: 240
+        videoBitrate: "300k"
+        audioBitrate: "48k"
+        profile: "baseline"
+        level: "3.0"
+        maxRate: "330k"
+        bufSize: "600k"
+        frameRate: 30.0
+        gopSeconds: 2.0
+
+  # Audio-only ladder
+  - name: audio_only
+    description: "Audio-only encoding options"
+    presets:
+      - name: "aac_high"
+        width: 0
+        height: 0
+        videoBitrate: "0"
+        audioBitrate: "256k"
+        profile: ""
+        level: ""
+        maxRate: "0"
+        bufSize: "0"
+        frameRate: 0
+        gopSeconds: 0
+
+      - name: "aac_medium"
+        width: 0
+        height: 0
+        videoBitrate: "0"
+        audioBitrate: "128k"
+        profile: ""
+        level: ""
+        maxRate: "0"
+        bufSize: "0"
+        frameRate: 0
+        gopSeconds: 0
+
+      - name: "aac_low"
+        width: 0
+        height: 0
+        videoBitrate: "0"
+        audioBitrate: "64k"
+        profile: ""
+        level: ""
+        maxRate: "0"
+        bufSize: "0"
+        frameRate: 0
+        gopSeconds: 0
+

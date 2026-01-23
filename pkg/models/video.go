@@ -4,239 +4,267 @@ import (
 	"time"
 )
 
-// Video represents a video in the system.
-type Video struct {
-	// ID is the unique identifier for the video.
-	ID string `json:"id" dynamodbav:"id"`
+// VideoStatus represents the processing status of a video.
+type VideoStatus string
 
-	// Title is the video title.
-	Title string `json:"title" dynamodbav:"title"`
-
-	// Description is the video description.
-	Description string `json:"description,omitempty" dynamodbav:"description,omitempty"`
-
-	// Status is the current processing status.
-	Status string `json:"status" dynamodbav:"status"`
-
-	// Progress is the processing progress (0-100).
-	Progress int `json:"progress,omitempty" dynamodbav:"progress,omitempty"`
-
-	// S3Key is the key of the original video in S3.
-	S3Key string `json:"s3Key" dynamodbav:"s3Key"`
-
-	// OutputPath is the path to the processed HLS output.
-	OutputPath string `json:"outputPath,omitempty" dynamodbav:"outputPath,omitempty"`
-
-	// MasterPlaylistURL is the URL to the HLS master playlist.
-	MasterPlaylistURL string `json:"masterPlaylistUrl,omitempty" dynamodbav:"masterPlaylistUrl,omitempty"`
-
-	// Duration is the video duration in seconds.
-	Duration float64 `json:"duration,omitempty" dynamodbav:"duration,omitempty"`
-
-	// Width is the video width in pixels.
-	Width int `json:"width,omitempty" dynamodbav:"width,omitempty"`
-
-	// Height is the video height in pixels.
-	Height int `json:"height,omitempty" dynamodbav:"height,omitempty"`
-
-	// Bitrate is the original video bitrate in bps.
-	Bitrate int64 `json:"bitrate,omitempty" dynamodbav:"bitrate,omitempty"`
-
-	// Codec is the original video codec.
-	Codec string `json:"codec,omitempty" dynamodbav:"codec,omitempty"`
-
-	// FileSize is the original file size in bytes.
-	FileSize int64 `json:"fileSize,omitempty" dynamodbav:"fileSize,omitempty"`
-
-	// OutputSize is the total output size in bytes.
-	OutputSize int64 `json:"outputSize,omitempty" dynamodbav:"outputSize,omitempty"`
-
-	// ThumbnailURL is the URL to the video thumbnail.
-	ThumbnailURL string `json:"thumbnailUrl,omitempty" dynamodbav:"thumbnailUrl,omitempty"`
-
-	// Variants contains information about each HLS variant.
-	Variants []VideoVariant `json:"variants,omitempty" dynamodbav:"variants,omitempty"`
-
-	// DRMEnabled indicates if DRM is enabled for this video.
-	DRMEnabled bool `json:"drmEnabled,omitempty" dynamodbav:"drmEnabled,omitempty"`
-
-	// DRMKeyID is the DRM key ID if DRM is enabled.
-	DRMKeyID string `json:"drmKeyId,omitempty" dynamodbav:"drmKeyId,omitempty"`
-
-	// SSAIEnabled indicates if SSAI is enabled for this video.
-	SSAIEnabled bool `json:"ssaiEnabled,omitempty" dynamodbav:"ssaiEnabled,omitempty"`
-
-	// AdBreaks contains the ad break definitions.
-	AdBreaks []AdBreakConfig `json:"adBreaks,omitempty" dynamodbav:"adBreaks,omitempty"`
-
-	// Metadata contains custom metadata.
-	Metadata map[string]string `json:"metadata,omitempty" dynamodbav:"metadata,omitempty"`
-
-	// Tags are searchable tags for the video.
-	Tags []string `json:"tags,omitempty" dynamodbav:"tags,omitempty"`
-
-	// ErrorMessage contains the error message if processing failed.
-	ErrorMessage string `json:"errorMessage,omitempty" dynamodbav:"errorMessage,omitempty"`
-
-	// CreatedAt is when the video was created.
-	CreatedAt time.Time `json:"createdAt" dynamodbav:"createdAt"`
-
-	// UpdatedAt is when the video was last updated.
-	UpdatedAt time.Time `json:"updatedAt" dynamodbav:"updatedAt"`
-
-	// ProcessedAt is when processing completed.
-	ProcessedAt *time.Time `json:"processedAt,omitempty" dynamodbav:"processedAt,omitempty"`
-
-	// UserID is the ID of the user who uploaded the video.
-	UserID string `json:"userId,omitempty" dynamodbav:"userId,omitempty"`
-}
-
-// VideoVariant represents an HLS variant stream.
-type VideoVariant struct {
-	// Name is the variant name (e.g., "1080p", "720p").
-	Name string `json:"name" dynamodbav:"name"`
-
-	// Resolution is the resolution string (e.g., "1920x1080").
-	Resolution string `json:"resolution" dynamodbav:"resolution"`
-
-	// Width is the variant width in pixels.
-	Width int `json:"width" dynamodbav:"width"`
-
-	// Height is the variant height in pixels.
-	Height int `json:"height" dynamodbav:"height"`
-
-	// Bitrate is the video bitrate in bps.
-	Bitrate int64 `json:"bitrate" dynamodbav:"bitrate"`
-
-	// AudioBitrate is the audio bitrate in bps.
-	AudioBitrate int64 `json:"audioBitrate" dynamodbav:"audioBitrate"`
-
-	// Codec is the video codec string.
-	Codec string `json:"codec" dynamodbav:"codec"`
-
-	// PlaylistPath is the relative path to the variant playlist.
-	PlaylistPath string `json:"playlistPath" dynamodbav:"playlistPath"`
-
-	// SegmentCount is the number of segments in this variant.
-	SegmentCount int `json:"segmentCount,omitempty" dynamodbav:"segmentCount,omitempty"`
-}
-
-// AdBreakConfig represents an ad break configuration.
-type AdBreakConfig struct {
-	// ID is the ad break identifier.
-	ID string `json:"id" dynamodbav:"id"`
-
-	// Type is the ad break type (preroll, midroll, postroll).
-	Type string `json:"type" dynamodbav:"type"`
-
-	// StartTime is the start time in seconds.
-	StartTime float64 `json:"startTime" dynamodbav:"startTime"`
-
-	// Duration is the maximum duration in seconds.
-	Duration float64 `json:"duration" dynamodbav:"duration"`
-
-	// SCTE35 is the optional SCTE-35 payload.
-	SCTE35 string `json:"scte35,omitempty" dynamodbav:"scte35,omitempty"`
-}
-
-// VideoStatus constants.
 const (
-	VideoStatusPending    = "pending"
-	VideoStatusProcessing = "processing"
-	VideoStatusCompleted  = "completed"
-	VideoStatusFailed     = "failed"
-	VideoStatusDeleted    = "deleted"
+	StatusPending    VideoStatus = "PENDING"
+	StatusProcessing VideoStatus = "PROCESSING"
+	StatusTranscoding VideoStatus = "TRANSCODING"
+	StatusPackaging  VideoStatus = "PACKAGING"
+	StatusEncrypting VideoStatus = "ENCRYPTING"
+	StatusCompleted  VideoStatus = "COMPLETED"
+	StatusFailed     VideoStatus = "FAILED"
+	StatusCancelled  VideoStatus = "CANCELLED"
 )
 
-// ProcessingJob represents a video processing job.
-type ProcessingJob struct {
-	// VideoID is the ID of the video being processed.
-	VideoID string `json:"videoId"`
+// Video represents a video in the system.
+type Video struct {
+	ID              string            `json:"id" dynamodbav:"id"`
+	UserID          string            `json:"userId,omitempty" dynamodbav:"userId,omitempty"`
+	Title           string            `json:"title,omitempty" dynamodbav:"title,omitempty"`
+	Description     string            `json:"description,omitempty" dynamodbav:"description,omitempty"`
+	Status          VideoStatus       `json:"status" dynamodbav:"status"`
+	SourceKey       string            `json:"sourceKey,omitempty" dynamodbav:"sourceKey,omitempty"`
+	OutputPrefix    string            `json:"outputPrefix,omitempty" dynamodbav:"outputPrefix,omitempty"`
+	HLSManifestURL  string            `json:"hlsManifestUrl,omitempty" dynamodbav:"hlsManifestUrl,omitempty"`
+	DASHManifestURL string            `json:"dashManifestUrl,omitempty" dynamodbav:"dashManifestUrl,omitempty"`
+	ThumbnailURL    string            `json:"thumbnailUrl,omitempty" dynamodbav:"thumbnailUrl,omitempty"`
+	Duration        float64           `json:"duration,omitempty" dynamodbav:"duration,omitempty"`
+	FileSize        int64             `json:"fileSize,omitempty" dynamodbav:"fileSize,omitempty"`
+	OutputSize      int64             `json:"outputSize,omitempty" dynamodbav:"outputSize,omitempty"`
+	Width           int               `json:"width,omitempty" dynamodbav:"width,omitempty"`
+	Height          int               `json:"height,omitempty" dynamodbav:"height,omitempty"`
+	FrameRate       float64           `json:"frameRate,omitempty" dynamodbav:"frameRate,omitempty"`
+	Bitrate         int64             `json:"bitrate,omitempty" dynamodbav:"bitrate,omitempty"`
+	VideoCodec      string            `json:"videoCodec,omitempty" dynamodbav:"videoCodec,omitempty"`
+	AudioCodec      string            `json:"audioCodec,omitempty" dynamodbav:"audioCodec,omitempty"`
+	CreatedAt       time.Time         `json:"createdAt" dynamodbav:"createdAt"`
+	UpdatedAt       time.Time         `json:"updatedAt" dynamodbav:"updatedAt"`
+	CompletedAt     *time.Time        `json:"completedAt,omitempty" dynamodbav:"completedAt,omitempty"`
+	ErrorMessage    string            `json:"errorMessage,omitempty" dynamodbav:"errorMessage,omitempty"`
+	ErrorCode       string            `json:"errorCode,omitempty" dynamodbav:"errorCode,omitempty"`
+	Metadata        map[string]string `json:"metadata,omitempty" dynamodbav:"metadata,omitempty"`
+	Tags            []string          `json:"tags,omitempty" dynamodbav:"tags,omitempty"`
 
-	// S3Key is the S3 key of the source video.
-	S3Key string `json:"s3Key"`
+	// Processing options
+	Options *VideoOptions `json:"options,omitempty" dynamodbav:"options,omitempty"`
 
-	// Bucket is the S3 bucket containing the source video.
-	Bucket string `json:"bucket"`
+	// Output information
+	Outputs *VideoOutputs `json:"outputs,omitempty" dynamodbav:"outputs,omitempty"`
 
-	// Title is the video title.
-	Title string `json:"title,omitempty"`
+	// DRM information
+	DRM *VideoDRM `json:"drm,omitempty" dynamodbav:"drm,omitempty"`
 
-	// Metadata contains custom metadata.
-	Metadata map[string]string `json:"metadata,omitempty"`
-
-	// Timestamp is when the job was created.
-	Timestamp int64 `json:"timestamp"`
-
-	// Options contains processing options.
-	Options ProcessingOptions `json:"options,omitempty"`
+	// SSAI information
+	SSAI *VideoSSAI `json:"ssai,omitempty" dynamodbav:"ssai,omitempty"`
 }
 
-// ProcessingOptions contains options for video processing.
-type ProcessingOptions struct {
-	// EnableLLHLS enables Low-Latency HLS output.
-	EnableLLHLS bool `json:"enableLlhls,omitempty"`
+// VideoOptions contains processing options for a video.
+type VideoOptions struct {
+	// Transcoding options
+	EnableLLHLS       bool     `json:"enableLlhls,omitempty" dynamodbav:"enableLlhls,omitempty"`
+	EnableCMAF        bool     `json:"enableCmaf,omitempty" dynamodbav:"enableCmaf,omitempty"`
+	SegmentDuration   float64  `json:"segmentDuration,omitempty" dynamodbav:"segmentDuration,omitempty"`
+	PartDuration      float64  `json:"partDuration,omitempty" dynamodbav:"partDuration,omitempty"`
+	Presets           []string `json:"presets,omitempty" dynamodbav:"presets,omitempty"`
+	EnableThumbnails  bool     `json:"enableThumbnails,omitempty" dynamodbav:"enableThumbnails,omitempty"`
+	ThumbnailInterval float64  `json:"thumbnailInterval,omitempty" dynamodbav:"thumbnailInterval,omitempty"`
 
-	// EnableCMAF enables CMAF (fMP4) segments.
-	EnableCMAF bool `json:"enableCmaf,omitempty"`
+	// DRM options
+	EnableDRM         bool     `json:"enableDrm,omitempty" dynamodbav:"enableDrm,omitempty"`
+	DRMSystems        []string `json:"drmSystems,omitempty" dynamodbav:"drmSystems,omitempty"` // widevine, fairplay, playready
+	EncryptionScheme  string   `json:"encryptionScheme,omitempty" dynamodbav:"encryptionScheme,omitempty"` // cenc, cbcs
 
-	// EnableDRM enables DRM encryption.
-	EnableDRM bool `json:"enableDrm,omitempty"`
+	// SSAI options
+	EnableSSAI        bool   `json:"enableSsai,omitempty" dynamodbav:"enableSsai,omitempty"`
+	PreserveSCTE35    bool   `json:"preserveScte35,omitempty" dynamodbav:"preserveScte35,omitempty"`
+	ContentID         string `json:"contentId,omitempty" dynamodbav:"contentId,omitempty"`
 
-	// EnableSSAI enables server-side ad insertion markers.
-	EnableSSAI bool `json:"enableSsai,omitempty"`
+	// CDN options
+	PreferredCDN      string `json:"preferredCdn,omitempty" dynamodbav:"preferredCdn,omitempty"`
 
-	// SegmentDuration is the target segment duration.
-	SegmentDuration float64 `json:"segmentDuration,omitempty"`
-
-	// PartDuration is the LL-HLS part duration.
-	PartDuration float64 `json:"partDuration,omitempty"`
-
-	// Presets are the encoding presets to use.
-	Presets []string `json:"presets,omitempty"`
-
-	// AdBreakTimes are the times for ad break markers.
-	AdBreakTimes []float64 `json:"adBreakTimes,omitempty"`
+	// Callback options
+	CallbackURL       string `json:"callbackUrl,omitempty" dynamodbav:"callbackUrl,omitempty"`
+	WebhookSecret     string `json:"-" dynamodbav:"webhookSecret,omitempty"` // Not serialized to JSON
 }
 
-// PlaybackRequest represents a playback request.
-type PlaybackRequest struct {
-	// VideoID is the ID of the video to play.
-	VideoID string `json:"videoId"`
-
-	// SessionID is an optional session identifier.
-	SessionID string `json:"sessionId,omitempty"`
-
-	// DRMSystem is the requested DRM system.
-	DRMSystem string `json:"drmSystem,omitempty"`
-
-	// AdParams are parameters for ad targeting.
-	AdParams map[string]string `json:"adParams,omitempty"`
-
-	// DeviceType is the device type for analytics.
-	DeviceType string `json:"deviceType,omitempty"`
+// VideoOutputs contains output information for a video.
+type VideoOutputs struct {
+	Variants       []VariantOutput `json:"variants,omitempty" dynamodbav:"variants,omitempty"`
+	IFramePlaylists []string       `json:"iframePlaylists,omitempty" dynamodbav:"iframePlaylists,omitempty"`
+	AudioRenditions []AudioOutput  `json:"audioRenditions,omitempty" dynamodbav:"audioRenditions,omitempty"`
+	Thumbnails      []string       `json:"thumbnails,omitempty" dynamodbav:"thumbnails,omitempty"`
 }
 
-// PlaybackResponse contains playback URLs and metadata.
-type PlaybackResponse struct {
-	// VideoID is the ID of the video.
-	VideoID string `json:"videoId"`
-
-	// HLSManifestURL is the HLS master playlist URL.
-	HLSManifestURL string `json:"hlsManifestUrl"`
-
-	// DASHManifestURL is the DASH manifest URL.
-	DASHManifestURL string `json:"dashManifestUrl,omitempty"`
-
-	// DRMLicenseURL is the DRM license server URL.
-	DRMLicenseURL string `json:"drmLicenseUrl,omitempty"`
-
-	// SessionID is the playback session ID.
-	SessionID string `json:"sessionId,omitempty"`
-
-	// Duration is the video duration.
-	Duration float64 `json:"duration"`
-
-	// Variants contains available quality variants.
-	Variants []VideoVariant `json:"variants,omitempty"`
+// VariantOutput represents a single variant/rendition output.
+type VariantOutput struct {
+	Name         string  `json:"name" dynamodbav:"name"`
+	PlaylistURL  string  `json:"playlistUrl" dynamodbav:"playlistUrl"`
+	Width        int     `json:"width" dynamodbav:"width"`
+	Height       int     `json:"height" dynamodbav:"height"`
+	Bandwidth    int64   `json:"bandwidth" dynamodbav:"bandwidth"`
+	AvgBandwidth int64   `json:"avgBandwidth,omitempty" dynamodbav:"avgBandwidth,omitempty"`
+	FrameRate    float64 `json:"frameRate,omitempty" dynamodbav:"frameRate,omitempty"`
+	Codecs       string  `json:"codecs" dynamodbav:"codecs"`
+	SegmentCount int     `json:"segmentCount,omitempty" dynamodbav:"segmentCount,omitempty"`
 }
+
+// AudioOutput represents an audio rendition output.
+type AudioOutput struct {
+	Name       string `json:"name" dynamodbav:"name"`
+	Language   string `json:"language" dynamodbav:"language"`
+	Channels   int    `json:"channels" dynamodbav:"channels"`
+	Bandwidth  int64  `json:"bandwidth" dynamodbav:"bandwidth"`
+	Codecs     string `json:"codecs" dynamodbav:"codecs"`
+	PlaylistURL string `json:"playlistUrl" dynamodbav:"playlistUrl"`
+}
+
+// VideoDRM contains DRM information for a video.
+type VideoDRM struct {
+	Enabled          bool      `json:"enabled" dynamodbav:"enabled"`
+	KeyID            string    `json:"keyId,omitempty" dynamodbav:"keyId,omitempty"`
+	Systems          []string  `json:"systems,omitempty" dynamodbav:"systems,omitempty"`
+	EncryptionScheme string    `json:"encryptionScheme,omitempty" dynamodbav:"encryptionScheme,omitempty"`
+	KeyRotation      bool      `json:"keyRotation,omitempty" dynamodbav:"keyRotation,omitempty"`
+	LicenseURLs      *DRMLicenseURLs `json:"licenseUrls,omitempty" dynamodbav:"licenseUrls,omitempty"`
+}
+
+// DRMLicenseURLs contains license URLs for each DRM system.
+type DRMLicenseURLs struct {
+	Widevine  string `json:"widevine,omitempty" dynamodbav:"widevine,omitempty"`
+	FairPlay  string `json:"fairplay,omitempty" dynamodbav:"fairplay,omitempty"`
+	PlayReady string `json:"playready,omitempty" dynamodbav:"playready,omitempty"`
+}
+
+// VideoSSAI contains SSAI information for a video.
+type VideoSSAI struct {
+	Enabled           bool        `json:"enabled" dynamodbav:"enabled"`
+	ConfigName        string      `json:"configName,omitempty" dynamodbav:"configName,omitempty"`
+	SessionURL        string      `json:"sessionUrl,omitempty" dynamodbav:"sessionUrl,omitempty"`
+	AdBreaks          []AdBreakInfo `json:"adBreaks,omitempty" dynamodbav:"adBreaks,omitempty"`
+	SCTE35Markers     int         `json:"scte35Markers,omitempty" dynamodbav:"scte35Markers,omitempty"`
+}
+
+// AdBreakInfo contains information about an ad break.
+type AdBreakInfo struct {
+	StartTime     float64 `json:"startTime" dynamodbav:"startTime"`
+	Duration      float64 `json:"duration" dynamodbav:"duration"`
+	SpliceEventID uint32  `json:"spliceEventId,omitempty" dynamodbav:"spliceEventId,omitempty"`
+}
+
+// UploadRequest represents a request to upload a video.
+type UploadRequest struct {
+	Filename    string            `json:"filename" validate:"required"`
+	ContentType string            `json:"contentType" validate:"required"`
+	FileSize    int64             `json:"fileSize" validate:"required,min=1"`
+	Title       string            `json:"title,omitempty"`
+	Description string            `json:"description,omitempty"`
+	Tags        []string          `json:"tags,omitempty"`
+	Metadata    map[string]string `json:"metadata,omitempty"`
+	Options     *VideoOptions     `json:"options,omitempty"`
+}
+
+// UploadResponse contains the response for an upload request.
+type UploadResponse struct {
+	VideoID     string            `json:"videoId"`
+	UploadURL   string            `json:"uploadUrl"`
+	UploadFields map[string]string `json:"uploadFields,omitempty"` // For multipart uploads
+	ExpiresAt   time.Time         `json:"expiresAt"`
+}
+
+// TranscodeJob represents a transcoding job message.
+type TranscodeJob struct {
+	VideoID     string        `json:"videoId"`
+	SourceKey   string        `json:"sourceKey"`
+	Options     *VideoOptions `json:"options,omitempty"`
+	Priority    int           `json:"priority,omitempty"`
+	RetryCount  int           `json:"retryCount,omitempty"`
+	CreatedAt   time.Time     `json:"createdAt"`
+}
+
+// VideoListResponse contains a paginated list of videos.
+type VideoListResponse struct {
+	Videos     []Video `json:"videos"`
+	NextToken  string  `json:"nextToken,omitempty"`
+	TotalCount int     `json:"totalCount,omitempty"`
+}
+
+// VideoStats contains statistics about videos.
+type VideoStats struct {
+	TotalVideos      int   `json:"totalVideos"`
+	ProcessingVideos int   `json:"processingVideos"`
+	CompletedVideos  int   `json:"completedVideos"`
+	FailedVideos     int   `json:"failedVideos"`
+	TotalDuration    int64 `json:"totalDuration"` // seconds
+	TotalStorage     int64 `json:"totalStorage"`  // bytes
+}
+
+// WebhookPayload represents the payload sent to callback URLs.
+type WebhookPayload struct {
+	Event     string    `json:"event"`
+	VideoID   string    `json:"videoId"`
+	Status    string    `json:"status"`
+	Timestamp time.Time `json:"timestamp"`
+	Video     *Video    `json:"video,omitempty"`
+	Error     *WebhookError `json:"error,omitempty"`
+}
+
+// WebhookError contains error information for webhook payloads.
+type WebhookError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+// IsTerminal returns true if the status is terminal (completed or failed).
+func (s VideoStatus) IsTerminal() bool {
+	return s == StatusCompleted || s == StatusFailed || s == StatusCancelled
+}
+
+// IsProcessing returns true if the video is currently being processed.
+func (s VideoStatus) IsProcessing() bool {
+	return s == StatusProcessing || s == StatusTranscoding || 
+		s == StatusPackaging || s == StatusEncrypting
+}
+
+// NewVideo creates a new Video with defaults.
+func NewVideo(id string) *Video {
+	now := time.Now()
+	return &Video{
+		ID:        id,
+		Status:    StatusPending,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Metadata:  make(map[string]string),
+	}
+}
+
+// SetStatus updates the video status and UpdatedAt timestamp.
+func (v *Video) SetStatus(status VideoStatus) {
+	v.Status = status
+	v.UpdatedAt = time.Now()
+	
+	if status == StatusCompleted {
+		now := time.Now()
+		v.CompletedAt = &now
+	}
+}
+
+// SetError sets the error information on the video.
+func (v *Video) SetError(code, message string) {
+	v.Status = StatusFailed
+	v.ErrorCode = code
+	v.ErrorMessage = message
+	v.UpdatedAt = time.Now()
+}
+
+// HasDRM returns true if the video has DRM enabled.
+func (v *Video) HasDRM() bool {
+	return v.DRM != nil && v.DRM.Enabled
+}
+
+// HasSSAI returns true if the video has SSAI enabled.
+func (v *Video) HasSSAI() bool {
+	return v.SSAI != nil && v.SSAI.Enabled
+}
+

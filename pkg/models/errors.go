@@ -1,234 +1,381 @@
 package models
 
-import "errors"
-
-// Validation Errors
-var (
-	// ErrInvalidFileType is returned when the uploaded file type is not supported.
-	ErrInvalidFileType = errors.New("invalid file type")
-
-	// ErrInvalidContentType is returned when the content type is not supported.
-	ErrInvalidContentType = errors.New("invalid content type")
-
-	// ErrFilenameTooLong is returned when the filename exceeds the maximum length.
-	ErrFilenameTooLong = errors.New("filename exceeds maximum length of 255 characters")
-
-	// ErrInvalidKeyFormat is returned when the S3 key format is invalid.
-	ErrInvalidKeyFormat = errors.New("invalid S3 key format")
-
-	// ErrInvalidVideoID is returned when the video ID is invalid.
-	ErrInvalidVideoID = errors.New("invalid video ID format")
-
-	// ErrMissingRequiredField is returned when a required field is missing.
-	ErrMissingRequiredField = errors.New("missing required field")
-
-	// ErrInvalidDuration is returned when video duration is invalid or exceeds limits.
-	ErrInvalidDuration = errors.New("invalid video duration")
-
-	// ErrInvalidResolution is returned when video resolution is invalid.
-	ErrInvalidResolution = errors.New("invalid video resolution")
-
-	// ErrFileTooLarge is returned when file size exceeds the maximum allowed.
-	ErrFileTooLarge = errors.New("file size exceeds maximum allowed")
+import (
+	"errors"
+	"fmt"
+	"net/http"
 )
 
-// Storage Errors
-var (
-	// ErrVideoNotFound is returned when a video is not found in storage.
-	ErrVideoNotFound = errors.New("video not found")
-
-	// ErrVideoAlreadyExists is returned when trying to create a video that already exists.
-	ErrVideoAlreadyExists = errors.New("video already exists")
-
-	// ErrStorageUnavailable is returned when storage is unavailable.
-	ErrStorageUnavailable = errors.New("storage unavailable")
-
-	// ErrStorageTimeout is returned when a storage operation times out.
-	ErrStorageTimeout = errors.New("storage operation timed out")
-
-	// ErrObjectNotFound is returned when an S3 object is not found.
-	ErrObjectNotFound = errors.New("object not found in S3")
-
-	// ErrBucketNotFound is returned when an S3 bucket is not found.
-	ErrBucketNotFound = errors.New("S3 bucket not found")
-
-	// ErrPermissionDenied is returned when access is denied.
-	ErrPermissionDenied = errors.New("permission denied")
+// Common error codes
+const (
+	ErrCodeInvalidInput      = "INVALID_INPUT"
+	ErrCodeNotFound          = "NOT_FOUND"
+	ErrCodeAlreadyExists     = "ALREADY_EXISTS"
+	ErrCodeUnauthorized      = "UNAUTHORIZED"
+	ErrCodeForbidden         = "FORBIDDEN"
+	ErrCodeRateLimited       = "RATE_LIMITED"
+	ErrCodeInternal          = "INTERNAL_ERROR"
+	ErrCodeUploadFailed      = "UPLOAD_FAILED"
+	ErrCodeTranscodeFailed   = "TRANSCODE_FAILED"
+	ErrCodePackagingFailed   = "PACKAGING_FAILED"
+	ErrCodeEncryptionFailed  = "ENCRYPTION_FAILED"
+	ErrCodeDRMFailed         = "DRM_FAILED"
+	ErrCodeCDNFailed         = "CDN_FAILED"
+	ErrCodeSSAIFailed        = "SSAI_FAILED"
+	ErrCodeStorageFailed     = "STORAGE_FAILED"
+	ErrCodeQueueFailed       = "QUEUE_FAILED"
+	ErrCodeTimeout           = "TIMEOUT"
+	ErrCodeCancelled         = "CANCELLED"
+	ErrCodeFFmpegFailed      = "FFMPEG_FAILED"
+	ErrCodeShakaFailed       = "SHAKA_FAILED"
+	ErrCodeInvalidFormat     = "INVALID_FORMAT"
+	ErrCodeUnsupportedCodec  = "UNSUPPORTED_CODEC"
 )
 
-// Transcoding Errors
+// Sentinel errors for common conditions
 var (
-	// ErrTranscodingFailed is returned when video transcoding fails.
-	ErrTranscodingFailed = errors.New("video transcoding failed")
-
-	// ErrUnsupportedCodec is returned when the video codec is not supported.
-	ErrUnsupportedCodec = errors.New("unsupported video codec")
-
-	// ErrUnsupportedFormat is returned when the video format is not supported.
-	ErrUnsupportedFormat = errors.New("unsupported video format")
-
-	// ErrFFmpegNotFound is returned when FFmpeg is not installed.
-	ErrFFmpegNotFound = errors.New("FFmpeg not found")
-
-	// ErrPackagerNotFound is returned when Shaka Packager is not installed.
-	ErrPackagerNotFound = errors.New("Shaka Packager not found")
-
-	// ErrTranscodingTimeout is returned when transcoding times out.
-	ErrTranscodingTimeout = errors.New("transcoding operation timed out")
-
-	// ErrInvalidPreset is returned when a transcoding preset is invalid.
-	ErrInvalidPreset = errors.New("invalid transcoding preset")
-
-	// ErrOutputPathInvalid is returned when the output path is invalid.
-	ErrOutputPathInvalid = errors.New("invalid output path")
+	ErrVideoNotFound     = NewAppError(ErrCodeNotFound, "video not found", http.StatusNotFound)
+	ErrInvalidVideoID    = NewAppError(ErrCodeInvalidInput, "invalid video ID", http.StatusBadRequest)
+	ErrUnauthorized      = NewAppError(ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
+	ErrForbidden         = NewAppError(ErrCodeForbidden, "forbidden", http.StatusForbidden)
+	ErrRateLimited       = NewAppError(ErrCodeRateLimited, "rate limit exceeded", http.StatusTooManyRequests)
+	ErrInternalServer    = NewAppError(ErrCodeInternal, "internal server error", http.StatusInternalServerError)
+	ErrInvalidInput      = NewAppError(ErrCodeInvalidInput, "invalid input", http.StatusBadRequest)
 )
 
-// CDN Errors
-var (
-	// ErrCDNUnavailable is returned when no CDN is available.
-	ErrCDNUnavailable = errors.New("no CDN available")
+// AppError represents an application-level error with context.
+type AppError struct {
+	Code       string            `json:"code"`
+	Message    string            `json:"message"`
+	Details    string            `json:"details,omitempty"`
+	HTTPStatus int               `json:"-"`
+	Err        error             `json:"-"`
+	Context    map[string]string `json:"context,omitempty"`
+}
 
-	// ErrCDNHealthCheckFailed is returned when a CDN health check fails.
-	ErrCDNHealthCheckFailed = errors.New("CDN health check failed")
+// Error implements the error interface.
+func (e *AppError) Error() string {
+	if e.Details != "" {
+		return fmt.Sprintf("%s: %s (%s)", e.Code, e.Message, e.Details)
+	}
+	return fmt.Sprintf("%s: %s", e.Code, e.Message)
+}
 
-	// ErrInvalidCDNConfig is returned when CDN configuration is invalid.
-	ErrInvalidCDNConfig = errors.New("invalid CDN configuration")
+// Unwrap returns the wrapped error.
+func (e *AppError) Unwrap() error {
+	return e.Err
+}
 
-	// ErrCDNTimeout is returned when a CDN request times out.
-	ErrCDNTimeout = errors.New("CDN request timed out")
+// Is allows error comparison with errors.Is.
+func (e *AppError) Is(target error) bool {
+	if t, ok := target.(*AppError); ok {
+		return e.Code == t.Code
+	}
+	return false
+}
 
-	// ErrInvalidManifest is returned when manifest manipulation fails.
-	ErrInvalidManifest = errors.New("invalid manifest format")
-)
+// NewAppError creates a new application error.
+func NewAppError(code, message string, httpStatus int) *AppError {
+	return &AppError{
+		Code:       code,
+		Message:    message,
+		HTTPStatus: httpStatus,
+	}
+}
 
-// DRM Errors
-var (
-	// ErrDRMProviderUnavailable is returned when the DRM provider is unavailable.
-	ErrDRMProviderUnavailable = errors.New("DRM provider unavailable")
+// WithDetails adds details to the error.
+func (e *AppError) WithDetails(details string) *AppError {
+	return &AppError{
+		Code:       e.Code,
+		Message:    e.Message,
+		Details:    details,
+		HTTPStatus: e.HTTPStatus,
+		Err:        e.Err,
+		Context:    e.Context,
+	}
+}
 
-	// ErrInvalidCPIXDocument is returned when a CPIX document is invalid.
-	ErrInvalidCPIXDocument = errors.New("invalid CPIX document")
+// WithError wraps another error.
+func (e *AppError) WithError(err error) *AppError {
+	return &AppError{
+		Code:       e.Code,
+		Message:    e.Message,
+		Details:    err.Error(),
+		HTTPStatus: e.HTTPStatus,
+		Err:        err,
+		Context:    e.Context,
+	}
+}
 
-	// ErrKeyNotFound is returned when a DRM key is not found.
-	ErrKeyNotFound = errors.New("DRM key not found")
+// WithContext adds context to the error.
+func (e *AppError) WithContext(key, value string) *AppError {
+	ctx := make(map[string]string)
+	for k, v := range e.Context {
+		ctx[k] = v
+	}
+	ctx[key] = value
+	
+	return &AppError{
+		Code:       e.Code,
+		Message:    e.Message,
+		Details:    e.Details,
+		HTTPStatus: e.HTTPStatus,
+		Err:        e.Err,
+		Context:    ctx,
+	}
+}
 
-	// ErrLicenseRequestFailed is returned when a license request fails.
-	ErrLicenseRequestFailed = errors.New("license request failed")
+// TranscodeError represents an error during transcoding.
+type TranscodeError struct {
+	VideoID string `json:"videoId"`
+	Stage   string `json:"stage"`
+	Err     error  `json:"-"`
+	Details string `json:"details,omitempty"`
+}
 
-	// ErrUnsupportedDRMSystem is returned when the DRM system is not supported.
-	ErrUnsupportedDRMSystem = errors.New("unsupported DRM system")
+// Error implements the error interface.
+func (e *TranscodeError) Error() string {
+	if e.Details != "" {
+		return fmt.Sprintf("transcode error for video %s at %s: %s", e.VideoID, e.Stage, e.Details)
+	}
+	if e.Err != nil {
+		return fmt.Sprintf("transcode error for video %s at %s: %v", e.VideoID, e.Stage, e.Err)
+	}
+	return fmt.Sprintf("transcode error for video %s at %s", e.VideoID, e.Stage)
+}
 
-	// ErrInvalidKeyFormat is returned when the key format is invalid.
-	ErrInvalidDRMKeyFormat = errors.New("invalid DRM key format")
+// Unwrap returns the wrapped error.
+func (e *TranscodeError) Unwrap() error {
+	return e.Err
+}
 
-	// ErrCertificateNotFound is returned when a DRM certificate is not found.
-	ErrCertificateNotFound = errors.New("DRM certificate not found")
-)
+// WrapTranscodeError creates a new TranscodeError wrapping an existing error.
+func WrapTranscodeError(err error, videoID, stage string) error {
+	return &TranscodeError{
+		VideoID: videoID,
+		Stage:   stage,
+		Err:     err,
+	}
+}
 
-// SSAI Errors
-var (
-	// ErrAdServerUnavailable is returned when the ad server is unavailable.
-	ErrAdServerUnavailable = errors.New("ad server unavailable")
+// NewTranscodeError creates a new TranscodeError with details.
+func NewTranscodeError(videoID, stage, details string) error {
+	return &TranscodeError{
+		VideoID: videoID,
+		Stage:   stage,
+		Details: details,
+	}
+}
 
-	// ErrInvalidVASTResponse is returned when a VAST response is invalid.
-	ErrInvalidVASTResponse = errors.New("invalid VAST response")
+// PackagingError represents an error during packaging.
+type PackagingError struct {
+	VideoID string `json:"videoId"`
+	Format  string `json:"format"` // HLS, DASH, CMAF
+	Err     error  `json:"-"`
+}
 
-	// ErrAdInsertionFailed is returned when ad insertion fails.
-	ErrAdInsertionFailed = errors.New("ad insertion failed")
+// Error implements the error interface.
+func (e *PackagingError) Error() string {
+	if e.Err != nil {
+		return fmt.Sprintf("packaging error for video %s (%s): %v", e.VideoID, e.Format, e.Err)
+	}
+	return fmt.Sprintf("packaging error for video %s (%s)", e.VideoID, e.Format)
+}
 
-	// ErrInvalidSCTE35Marker is returned when a SCTE-35 marker is invalid.
-	ErrInvalidSCTE35Marker = errors.New("invalid SCTE-35 marker")
+// Unwrap returns the wrapped error.
+func (e *PackagingError) Unwrap() error {
+	return e.Err
+}
 
-	// ErrMediaTailorError is returned for MediaTailor-specific errors.
-	ErrMediaTailorError = errors.New("MediaTailor error")
+// DRMError represents an error during DRM processing.
+type DRMError struct {
+	VideoID  string `json:"videoId"`
+	System   string `json:"system"` // widevine, fairplay, playready
+	KeyID    string `json:"keyId,omitempty"`
+	Err      error  `json:"-"`
+}
 
-	// ErrSessionNotFound is returned when a MediaTailor session is not found.
-	ErrSessionNotFound = errors.New("session not found")
-)
+// Error implements the error interface.
+func (e *DRMError) Error() string {
+	if e.Err != nil {
+		return fmt.Sprintf("DRM error for video %s (%s): %v", e.VideoID, e.System, e.Err)
+	}
+	return fmt.Sprintf("DRM error for video %s (%s)", e.VideoID, e.System)
+}
 
-// Queue Errors
-var (
-	// ErrQueueUnavailable is returned when the message queue is unavailable.
-	ErrQueueUnavailable = errors.New("message queue unavailable")
+// Unwrap returns the wrapped error.
+func (e *DRMError) Unwrap() error {
+	return e.Err
+}
 
-	// ErrMessageInvalid is returned when a queue message is invalid.
-	ErrMessageInvalid = errors.New("invalid queue message")
+// CDNError represents an error during CDN operations.
+type CDNError struct {
+	Provider string `json:"provider"`
+	URL      string `json:"url,omitempty"`
+	Err      error  `json:"-"`
+}
 
-	// ErrMessageProcessingFailed is returned when message processing fails.
-	ErrMessageProcessingFailed = errors.New("message processing failed")
+// Error implements the error interface.
+func (e *CDNError) Error() string {
+	if e.Err != nil {
+		return fmt.Sprintf("CDN error for provider %s: %v", e.Provider, e.Err)
+	}
+	return fmt.Sprintf("CDN error for provider %s", e.Provider)
+}
 
-	// ErrMaxRetriesExceeded is returned when max retries are exceeded.
-	ErrMaxRetriesExceeded = errors.New("maximum retries exceeded")
-)
+// Unwrap returns the wrapped error.
+func (e *CDNError) Unwrap() error {
+	return e.Err
+}
 
-// Authentication Errors
-var (
-	// ErrInvalidToken is returned when a JWT token is invalid.
-	ErrInvalidToken = errors.New("invalid token")
+// ValidationError represents a validation error.
+type ValidationError struct {
+	Field   string `json:"field"`
+	Message string `json:"message"`
+	Value   any    `json:"value,omitempty"`
+}
 
-	// ErrTokenExpired is returned when a JWT token has expired.
-	ErrTokenExpired = errors.New("token expired")
+// Error implements the error interface.
+func (e *ValidationError) Error() string {
+	return fmt.Sprintf("validation error on field '%s': %s", e.Field, e.Message)
+}
 
-	// ErrUnauthorized is returned when authentication fails.
-	ErrUnauthorized = errors.New("unauthorized")
+// ValidationErrors is a collection of validation errors.
+type ValidationErrors []ValidationError
 
-	// ErrInvalidCredentials is returned when credentials are invalid.
-	ErrInvalidCredentials = errors.New("invalid credentials")
-)
+// Error implements the error interface.
+func (e ValidationErrors) Error() string {
+	if len(e) == 1 {
+		return e[0].Error()
+	}
+	return fmt.Sprintf("%d validation errors occurred", len(e))
+}
 
-// Error Wrapping Helpers
-// WrapError wraps an error with additional context.
-func WrapError(err error, message string) error {
-	if err == nil {
+// Add adds a validation error.
+func (e *ValidationErrors) Add(field, message string) {
+	*e = append(*e, ValidationError{Field: field, Message: message})
+}
+
+// HasErrors returns true if there are any validation errors.
+func (e ValidationErrors) HasErrors() bool {
+	return len(e) > 0
+}
+
+// ToAppError converts validation errors to an AppError.
+func (e ValidationErrors) ToAppError() *AppError {
+	if len(e) == 0 {
 		return nil
 	}
-	return &wrappedError{
-		err:     err,
-		message: message,
+	
+	return NewAppError(ErrCodeInvalidInput, "validation failed", http.StatusBadRequest).
+		WithDetails(e.Error())
+}
+
+// Error response helpers
+
+// ErrorResponse represents an API error response.
+type ErrorResponse struct {
+	Error *ErrorDetail `json:"error"`
+}
+
+// ErrorDetail contains error details for API responses.
+type ErrorDetail struct {
+	Code    string            `json:"code"`
+	Message string            `json:"message"`
+	Details string            `json:"details,omitempty"`
+	Context map[string]string `json:"context,omitempty"`
+}
+
+// NewErrorResponse creates an error response from an error.
+func NewErrorResponse(err error) *ErrorResponse {
+	var appErr *AppError
+	if errors.As(err, &appErr) {
+		return &ErrorResponse{
+			Error: &ErrorDetail{
+				Code:    appErr.Code,
+				Message: appErr.Message,
+				Details: appErr.Details,
+				Context: appErr.Context,
+			},
+		}
+	}
+
+	return &ErrorResponse{
+		Error: &ErrorDetail{
+			Code:    ErrCodeInternal,
+			Message: "internal server error",
+		},
 	}
 }
 
-type wrappedError struct {
-	err     error
-	message string
+// GetHTTPStatus returns the HTTP status code for an error.
+func GetHTTPStatus(err error) int {
+	var appErr *AppError
+	if errors.As(err, &appErr) {
+		if appErr.HTTPStatus > 0 {
+			return appErr.HTTPStatus
+		}
+	}
+
+	// Map error types to status codes
+	var transcodeErr *TranscodeError
+	var packagingErr *PackagingError
+	var drmErr *DRMError
+	var cdnErr *CDNError
+	var validationErr *ValidationError
+	var validationErrs ValidationErrors
+
+	switch {
+	case errors.As(err, &transcodeErr):
+		return http.StatusInternalServerError
+	case errors.As(err, &packagingErr):
+		return http.StatusInternalServerError
+	case errors.As(err, &drmErr):
+		return http.StatusInternalServerError
+	case errors.As(err, &cdnErr):
+		return http.StatusBadGateway
+	case errors.As(err, &validationErr):
+		return http.StatusBadRequest
+	case errors.As(err, &validationErrs):
+		return http.StatusBadRequest
+	default:
+		return http.StatusInternalServerError
+	}
 }
 
-func (e *wrappedError) Error() string {
-	return e.message + ": " + e.err.Error()
-}
-
-func (e *wrappedError) Unwrap() error {
-	return e.err
-}
-
-// IsRetryable returns true if the error is retryable.
+// IsRetryable returns true if the error can be retried.
 func IsRetryable(err error) bool {
-	switch {
-	case errors.Is(err, ErrStorageTimeout),
-		errors.Is(err, ErrStorageUnavailable),
-		errors.Is(err, ErrCDNTimeout),
-		errors.Is(err, ErrCDNUnavailable),
-		errors.Is(err, ErrQueueUnavailable),
-		errors.Is(err, ErrDRMProviderUnavailable),
-		errors.Is(err, ErrAdServerUnavailable):
-		return true
-	default:
-		return false
+	var appErr *AppError
+	if errors.As(err, &appErr) {
+		switch appErr.Code {
+		case ErrCodeTimeout, ErrCodeRateLimited, ErrCodeCDNFailed, ErrCodeQueueFailed:
+			return true
+		}
 	}
+
+	var cdnErr *CDNError
+	if errors.As(err, &cdnErr) {
+		return true
+	}
+
+	return false
 }
 
-// IsPermanent returns true if the error is permanent and should not be retried.
-func IsPermanent(err error) bool {
-	switch {
-	case errors.Is(err, ErrInvalidFileType),
-		errors.Is(err, ErrInvalidContentType),
-		errors.Is(err, ErrUnsupportedCodec),
-		errors.Is(err, ErrUnsupportedFormat),
-		errors.Is(err, ErrInvalidPreset),
-		errors.Is(err, ErrInvalidCPIXDocument),
-		errors.Is(err, ErrUnsupportedDRMSystem):
-		return true
-	default:
-		return false
+// ShouldAlert returns true if the error should trigger an alert.
+func ShouldAlert(err error) bool {
+	var appErr *AppError
+	if errors.As(err, &appErr) {
+		switch appErr.Code {
+		case ErrCodeInternal, ErrCodeDRMFailed, ErrCodeFFmpegFailed, ErrCodeShakaFailed:
+			return true
+		}
 	}
+
+	var drmErr *DRMError
+	if errors.As(err, &drmErr) {
+		return true
+	}
+
+	return false
 }
+

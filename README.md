@@ -1,32 +1,195 @@
 # HLS Video Pipeline
 
-A scalable video transcoding pipeline that converts uploaded videos to HLS (HTTP Live Streaming) format with multiple quality levels.
+A scalable, cloud-native video transcoding pipeline built with Go, supporting HLS, LL-HLS, CMAF, Multi-CDN, DRM, and Server-Side Ad Insertion (SSAI).
 
-## Architecture
+## Architecture Overview
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   Client    │────▶│   API       │────▶│   S3 Raw    │
-│             │     │   Service   │     │   Bucket    │
-└─────────────┘     └──────┬──────┘     └─────────────┘
-                           │                    │
-                           ▼                    │
-                    ┌─────────────┐             │
-                    │   SQS       │◀────────────┘
-                    │   Queue     │
-                    └──────┬──────┘
-                           │
-                           ▼
-                    ┌─────────────┐     ┌─────────────┐
-                    │   Worker    │────▶│ S3 Processed│
-                    │   Service   │     │   Bucket    │
-                    └──────┬──────┘     └──────┬──────┘
-                           │                    │
-                           ▼                    ▼
-                    ┌─────────────┐     ┌─────────────┐
-                    │  DynamoDB   │     │ CloudFront  │
-                    │             │     │   CDN       │
-                    └─────────────┘     └─────────────┘
+│   Client    │────▶│   API       │────▶│  S3 Raw     │
+│             │     │  Service    │     │  Bucket     │
+└─────────────┘     └──────┬──────┘     └──────┬──────┘
+                          │                    │
+                          ▼                    │
+                   ┌─────────────┐             │
+                   │    SQS      │◀────────────┘
+                   │   Queue     │
+                   └──────┬──────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────┐
+│                    Worker Service                        │
+│  ┌───────────┐  ┌───────────┐  ┌───────────┐           │
+│  │ Transcode │─▶│  Package  │─▶│  Encrypt  │           │
+│  │  (FFmpeg) │  │(Shaka/FFM)│  │   (DRM)   │           │
+│  └───────────┘  └───────────┘  └───────────┘           │
+└──────────────────────────┬──────────────────────────────┘
+                          │
+                          ▼
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│S3 Processed │────▶│  CloudFront │────▶│   Player    │
+│   Bucket    │     │  / Multi-CDN│     │             │
+└─────────────┘     └─────────────┘     └─────────────┘
+```
+
+## Features
+
+### Core Video Processing
+- **Multi-bitrate transcoding** with customizable encoding ladder
+- **HLS v9 / LL-HLS support** with partial segments (EXT-X-PART)
+- **CMAF packaging** for unified streaming
+- **DASH manifest generation**
+- **I-frame playlists** for trick play support
+
+### Content Protection (DRM)
+- **Widevine** - CENC encryption with PSSH generation
+- **FairPlay** - CBCS encryption with HLS signaling
+- **PlayReady** - CENC encryption with PRO header generation
+- **CPIX key exchange** for enterprise key management
+- **Multi-DRM** - Support all systems simultaneously
+
+### CDN & Delivery
+- **Multi-CDN routing** with weighted, latency, or geo-based selection
+- **CDN health monitoring** with automatic failover
+- **Session stickiness** for consistent playback
+- **Manifest rewriting** for CDN-specific URLs
+
+### Ad Insertion (SSAI)
+- **SCTE-35 marker handling** - Parse, generate, and preserve markers
+- **AWS MediaTailor integration** - Personalized ad insertion
+- **Ad break management** - Cue-out/cue-in support
+- **Tracking event reporting**
+
+### Infrastructure
+- **AWS-native** - S3, SQS, DynamoDB, ECS, CloudFront
+- **Terraform IaC** - Complete infrastructure as code
+- **OpenTelemetry** - Distributed tracing
+- **Prometheus metrics** - Comprehensive observability
+
+## Quick Start
+
+### Prerequisites
+
+- Go 1.22+
+- Docker
+- AWS CLI configured
+- Terraform 1.5+
+- FFmpeg 6.0+ (with libx264, libfdk-aac)
+- Shaka Packager (optional, for advanced packaging)
+
+### Local Development
+
+```bash
+# Clone the repository
+git clone https://github.com/amillerrr/hls-pipeline.git
+cd hls-pipeline
+
+# Install dependencies
+go mod download
+
+# Copy environment template
+cp .env.example .env
+# Edit .env with your configuration
+
+# Run the API locally
+go run cmd/api/main.go
+
+# Run the worker locally  
+go run cmd/worker/main.go
+```
+
+### Docker
+
+```bash
+# Build images
+docker build -t hls-pipeline-api -f Dockerfile --target api .
+docker build -t hls-pipeline-worker -f Dockerfile --target worker .
+
+# Run with docker-compose
+docker-compose up
+```
+
+### Deploy to AWS
+
+```bash
+cd infra/environments/dev
+
+# Initialize Terraform
+terraform init
+
+# Review the plan
+terraform plan
+
+# Apply
+terraform apply
+```
+
+## Configuration
+
+### Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `AWS_REGION` | AWS region | `us-west-2` |
+| `S3_BUCKET` | Raw uploads bucket | Required |
+| `PROCESSED_BUCKET` | Processed output bucket | Required |
+| `SQS_QUEUE_URL` | Job queue URL | Required |
+| `DYNAMODB_TABLE` | Video metadata table | Required |
+| `CDN_DOMAIN` | CloudFront domain | Required |
+| `JWT_SECRET` | JWT signing secret | Required |
+| `ENABLE_LLHLS` | Enable LL-HLS | `true` |
+| `ENABLE_CMAF` | Enable CMAF packaging | `true` |
+| `ENABLE_DRM` | Enable DRM encryption | `false` |
+| `ENABLE_SSAI` | Enable ad insertion | `false` |
+| `ENABLE_MULTI_CDN` | Enable multi-CDN | `false` |
+
+### Presets Configuration
+
+Encoding presets are configured in `configs/presets.yaml`:
+
+```yaml
+collections:
+  - name: default
+    presets:
+      - name: "1080p"
+        width: 1920
+        height: 1080
+        videoBitrate: "5000k"
+        audioBitrate: "192k"
+        profile: "high"
+        level: "4.2"
+```
+
+## API Reference
+
+### Upload Video
+
+```bash
+POST /api/v1/videos/upload
+Content-Type: application/json
+
+{
+  "filename": "video.mp4",
+  "contentType": "video/mp4",
+  "fileSize": 104857600,
+  "options": {
+    "enableLlhls": true,
+    "enableDrm": false,
+    "presets": ["1080p", "720p", "480p"]
+  }
+}
+```
+
+### Get Video Status
+
+```bash
+GET /api/v1/videos/{videoId}
+```
+
+### List Videos
+
+```bash
+GET /api/v1/videos?limit=20&nextToken=xxx
 ```
 
 ## Project Structure
@@ -34,161 +197,66 @@ A scalable video transcoding pipeline that converts uploaded videos to HLS (HTTP
 ```
 hls-pipeline/
 ├── cmd/
-│   ├── api/main.go          # API service entry point (~50 lines)
-│   └── worker/main.go       # Worker service entry point (~50 lines)
+│   ├── api/           # API service entrypoint
+│   └── worker/        # Worker service entrypoint
 ├── internal/
-│   ├── config/              # Centralized configuration management
-│   │   ├── config.go
-│   │   └── config_test.go
-│   ├── api/                 # HTTP server, handlers, middleware
-│   │   ├── server.go
-│   │   ├── handlers.go
-│   │   ├── handlers_test.go
-│   │   └── middleware.go
-│   ├── worker/              # SQS polling, job processing
-│   │   ├── worker.go
-│   │   ├── downloader.go
-│   │   └── uploader.go
-│   ├── transcoder/          # FFmpeg, presets, playlist generation
-│   │   ├── ffmpeg.go
-│   │   ├── presets.go
-│   │   ├── playlist.go
-│   │   └── transcoder_test.go
-│   ├── storage/             # S3 and DynamoDB clients
-│   │   ├── s3.go
-│   │   └── dynamodb.go
-│   ├── auth/                # JWT and rate limiting
-│   │   ├── jwt.go
-│   │   ├── ratelimit.go
-│   │   └── auth_test.go
-│   ├── health/              # Health check functionality
-│   │   ├── checker.go
-│   │   └── checker_test.go
-│   ├── metrics/             # Prometheus metrics
-│   │   └── metrics.go
-│   └── observability/       # OpenTelemetry tracing
-│       └── tracer.go
-├── pkg/models/              # Shared data types
-│   ├── video.go
-│   └── errors.go
-├── infra/                   # Terraform infrastructure
-│   └── ecr.tf
-├── Makefile
-├── go.mod
-└── README.md
+│   ├── api/           # HTTP handlers and middleware
+│   ├── config/        # Configuration management
+│   ├── transcoder/    # FFmpeg transcoding
+│   ├── packager/      # CMAF/HLS packaging
+│   ├── cdn/           # Multi-CDN routing
+│   ├── drm/           # DRM encryption
+│   ├── ssai/          # Ad insertion
+│   ├── metrics/       # Prometheus metrics
+│   └── worker/        # Job processing
+├── pkg/
+│   ├── models/        # Data models
+│   └── hlsutils/      # HLS parsing utilities
+├── configs/           # Configuration files
+│   └── presets.yaml   # Encoding presets
+├── infra/
+│   ├── modules/       # Terraform modules
+│   └── environments/  # Environment configs
+└── scripts/           # Utility scripts
 ```
 
-## Configuration
+## Monitoring
 
-All configuration is centralized in `internal/config/config.go`. Environment variables:
+### Prometheus Metrics
 
-### Required for API
+Key metrics exposed at `/metrics`:
 
-| Variable | Description |
-|----------|-------------|
-| `S3_BUCKET` | Raw video upload bucket |
-| `SQS_QUEUE_URL` | Processing queue URL |
-| `DYNAMODB_TABLE` | Video metadata table |
-| `JWT_SECRET` | Secret for JWT signing (min 32 chars in production) |
+- `hls_pipeline_transcode_duration_seconds` - Transcoding duration
+- `hls_pipeline_transcode_jobs_total` - Total jobs by status
+- `hls_pipeline_cdn_health_status` - CDN provider health
+- `hls_pipeline_drm_encryption_duration_seconds` - DRM encryption time
+- `hls_pipeline_ssai_ad_breaks_total` - Ad breaks served
 
-### Required for Worker
+### Health Checks
 
-| Variable | Description |
-|----------|-------------|
-| `S3_BUCKET` | Raw video upload bucket |
-| `PROCESSED_BUCKET` | HLS output bucket |
-| `SQS_QUEUE_URL` | Processing queue URL |
-| `DYNAMODB_TABLE` | Video metadata table |
-| `CDN_DOMAIN` | CloudFront domain for playback URLs |
+- `GET /health` - Liveness check
+- `GET /ready` - Readiness check (includes dependencies)
 
-### Optional
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ENV` | `dev` | Environment (dev/prod/production) |
-| `PORT` | `8080` | API server port |
-| `METRICS_PORT` | `2112` | Prometheus metrics port |
-| `AWS_REGION` | `us-west-2` | AWS region |
-| `MAX_CONCURRENT_JOBS` | `1` | Worker concurrency |
-| `CORS_ALLOWED_ORIGINS` | (hardcoded) | Comma-separated origins |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | `localhost:4317` | OpenTelemetry endpoint |
-
-## API Endpoints
-
-### Public
-
-- `GET /health` - Basic health check
-- `GET /health/deep` - Deep health check (rate limited)
-- `POST /login` - Authenticate and get JWT token
-- `GET /latest` - Get most recently processed video
-
-### Protected (requires JWT)
-
-- `POST /upload/init` - Get presigned URL for upload
-- `POST /upload/complete` - Confirm upload and queue processing
-
-## Development
+## Testing
 
 ```bash
-# Install dependencies
-make deps
-
-# Run tests
-make test
+# Run unit tests
+go test ./...
 
 # Run with coverage
-make test-coverage
+go test -cover ./...
 
-# Build binaries
-make build
+# Run integration tests
+go test -tags=integration ./...
 
-# Run locally
-make run-api     # In one terminal
-make run-worker  # In another terminal
-
-# Lint code
-make lint
+# Run benchmarks
+go test -bench=. ./internal/transcoder/
 ```
 
-## Quality Presets
+## Contributing
 
-Videos are transcoded to three quality levels:
-
-| Preset | Resolution | Video Bitrate | Audio Bitrate |
-|--------|------------|---------------|---------------|
-| 1080p  | 1920x1080  | 5 Mbps        | 192 kbps      |
-| 720p   | 1280x720   | 2.5 Mbps      | 128 kbps      |
-| 480p   | 854x480    | 1 Mbps        | 96 kbps       |
-
-## Metrics
-
-Prometheus metrics are exposed at `/metrics` (internal network only):
-
-### Worker Metrics
-- `hls_videos_processed_total{status}` - Videos processed by status
-- `hls_video_processing_duration_seconds` - Processing duration
-- `hls_video_download_duration_seconds` - S3 download duration
-- `hls_video_upload_duration_seconds` - S3 upload duration
-- `hls_video_transcode_duration_seconds` - FFmpeg transcoding duration
-- `hls_video_quality_score` - SSIM quality metric
-- `hls_active_jobs` - Currently processing jobs
-
-### API Metrics
-- `hls_api_http_requests_total{method,path,status}` - HTTP requests
-- `hls_api_http_request_duration_seconds` - Request duration
-- `hls_api_auth_failures_total{reason}` - Auth failures
-- `hls_api_uploads_initiated_total` - Upload initiations
-- `hls_api_uploads_completed_total` - Completed uploads
-
-## Security Features
-
-- JWT authentication with configurable expiration
-- Rate limiting on failed auth attempts
-- Path traversal prevention on S3 keys
-- CORS with configurable allowed origins
-- Metrics endpoint restricted to internal networks
-- Production mode enforces strong secrets
-
-## License
-
-MIT
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
