@@ -1,16 +1,12 @@
-# =============================================================================
-# Route53
-# =============================================================================
-
-# root_domain     = ""
-# subdomain_label = ""
+# terraform.tfvars - Example configuration for HLS Pipeline
+# Copy this file and customize for your environment
 
 # =============================================================================
 # Environment
 # =============================================================================
 
 environment = "dev"
-aws_region  = "us-west-2"
+aws_region  = "us-east-1"
 
 common_tags = {
   Project     = "hls-pipeline"
@@ -156,12 +152,9 @@ worker_max_count     = 10
 # API Configuration
 # =============================================================================
 
-api_username = "admin"
-api_password = "your-secure-password-here-min-12-chars"
 api_rate_limit   = 100
 api_burst_limit  = 200
-jwt_secret = "your-very-secure-jwt-secret-key-minimum-32-characters"
-
+jwt_secret       = "change-this-in-production"  # Store in secrets manager
 jwt_expiration_hours = 24
 
 # =============================================================================
@@ -171,4 +164,3 @@ jwt_expiration_hours = 24
 enable_xray        = true
 log_retention_days = 30
 alarm_email        = ""  # Set to receive CloudWatch alarm notifications
-
